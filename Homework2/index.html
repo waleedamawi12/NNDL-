@@ -1,159 +1,117 @@
 <!-- index.html -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Titanic EDA (Browser-only • GitHub Pages)</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Titanic TF.js — Browser-only Shallow Classifier</title>
 
-  <!-- CDN libraries (client-side only) -->
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <!-- TensorFlow.js + tfjs-vis (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-vis@latest"></script>
 
   <style>
     :root{
-      --bg:#0b1020;
-      --panel:#111a33;
-      --panel2:rgba(17,26,51,.72);
-      --text:#e8eeff;
-      --muted:#93a4c7;
-      --border:rgba(255,255,255,.12);
-      --btn:rgba(122,162,255,.22);
-      --btn2:rgba(255,255,255,.07);
-      --danger:rgba(255,107,107,.20);
+      --bg:#0b1020; --panel:#111a33; --muted:#93a4c7; --text:#e8eeff;
+      --border:rgba(255,255,255,.12); --accent:#7aa2ff; --danger:#ff6b6b; --ok:#2ee59d;
     }
     *{box-sizing:border-box}
     body{
-      margin:0;
-      font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,Helvetica,sans-serif;
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 10% 0%, rgba(122,162,255,0.25), transparent 50%),
+                  radial-gradient(900px 600px at 90% 10%, rgba(46,229,157,0.12), transparent 60%),
+                  var(--bg);
       color:var(--text);
-      background:
-        radial-gradient(1100px 650px at 10% 0%, rgba(122,162,255,.25), transparent 55%),
-        radial-gradient(900px 600px at 85% 10%, rgba(46,229,157,.12), transparent 60%),
-        var(--bg);
     }
     header{
-      position:sticky; top:0; z-index:10;
-      backdrop-filter: blur(8px);
-      background:linear-gradient(to bottom, rgba(17,26,51,.85), rgba(17,26,51,.45));
-      border-bottom:1px solid var(--border);
-      padding:18px 16px 12px;
+      padding:18px 16px; border-bottom:1px solid var(--border);
+      background: linear-gradient(to bottom, rgba(17,26,51,.75), rgba(17,26,51,.35));
+      position: sticky; top:0; backdrop-filter: blur(8px); z-index:10;
     }
-    header h1{margin:0 0 6px;font-size:20px;font-weight:800;letter-spacing:.2px}
-    header p{margin:0;color:var(--muted);font-size:13px;line-height:1.45}
-    main{
-      max-width:1200px;
-      margin:0 auto;
-      padding:16px;
-      display:grid;
-      gap:14px;
-    }
+    header h1{margin:0 0 6px; font-size:18px; font-weight:900}
+    header p{margin:0; color:var(--muted); font-size:13px; line-height:1.45}
+    main{max-width:1200px; margin:0 auto; padding:16px; display:grid; gap:14px;}
     section{
-      background:var(--panel2);
+      background: rgba(17,26,51,.70);
       border:1px solid var(--border);
       border-radius:14px;
       padding:14px;
       box-shadow:0 8px 30px rgba(0,0,0,.25);
     }
     section h2{
-      margin:0 0 10px;
-      font-size:14px;
-      letter-spacing:.35px;
-      text-transform:uppercase;
+      margin:0 0 10px; font-size:13px; letter-spacing:.3px; text-transform:uppercase;
       color:rgba(232,238,255,.92);
     }
-    .grid{display:grid;gap:14px;grid-template-columns:1fr}
-    @media(min-width:980px){
-      .grid.cols-2{grid-template-columns:1fr 1fr}
-      .grid.cols-3{grid-template-columns:1fr 1fr 1fr}
+    .grid{display:grid; gap:14px; grid-template-columns: 1fr;}
+    @media (min-width: 980px){
+      .grid.cols-2{grid-template-columns: 1fr 1fr;}
+      .grid.cols-3{grid-template-columns: 1fr 1fr 1fr;}
     }
-    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-    label{font-size:13px;color:var(--muted)}
-    input[type=file]{
-      width:100%;
-      padding:10px;
-      border:1px dashed var(--border);
-      border-radius:12px;
-      background:rgba(11,16,32,.35);
-      color:var(--text);
+    .row{display:flex; flex-wrap:wrap; gap:10px; align-items:center;}
+    label{font-size:13px; color:var(--muted);}
+    input[type="file"]{
+      width:100%; padding:10px; border:1px dashed var(--border); border-radius:12px;
+      background: rgba(11,16,32,.35); color:var(--text);
     }
     button{
       border:1px solid var(--border);
-      background:var(--btn);
+      background: rgba(122,162,255,.20);
       color:var(--text);
       padding:10px 12px;
       border-radius:12px;
       cursor:pointer;
-      font-weight:700;
+      font-weight:800;
       letter-spacing:.2px;
     }
-    button:hover{filter:brightness(1.05)}
-    button.secondary{background:var(--btn2)}
-    button.danger{background:var(--danger)}
+    button:hover{background: rgba(122,162,255,.28);}
+    button.secondary{background: rgba(255,255,255,.06);}
+    button.danger{background: rgba(255,107,107,.18);}
     .pill{
-      display:inline-flex;gap:8px;align-items:center;
-      padding:6px 10px;border-radius:999px;
+      display:inline-flex; gap:8px; align-items:center;
+      padding:6px 10px; border-radius:999px;
       border:1px solid var(--border);
-      background:rgba(255,255,255,.06);
-      font-size:12px;color:var(--muted);
+      background: rgba(255,255,255,.06);
+      font-size:12px; color:var(--muted);
     }
-    .pill b{color:var(--text)}
-    .note{margin-top:10px;color:var(--muted);font-size:12px;line-height:1.55}
-    .hr{height:1px;background:var(--border);margin:10px 0}
+    .pill b{color:var(--text);}
+    .note{margin-top:10px; color:var(--muted); font-size:12px; line-height:1.5;}
+    .hint{color:rgba(46,229,157,.9); font-weight:800;}
     .scroll{
-      overflow:auto;border-radius:12px;border:1px solid var(--border);
-      background:rgba(11,16,32,.35);
+      overflow:auto; border-radius:12px; border:1px solid var(--border);
+      background: rgba(11,16,32,.35);
     }
-    table{width:100%;border-collapse:collapse;min-width:720px}
-    th,td{
-      padding:8px 10px;
-      border-bottom:1px solid rgba(255,255,255,.06);
-      font-size:12px;white-space:nowrap;
-    }
-    th{
-      position:sticky;top:0;z-index:2;
-      background:rgba(11,16,32,.88);
-      text-align:left;color:rgba(232,238,255,.95);
-    }
-    td{color:rgba(232,238,255,.88)}
-    .muted{color:var(--muted)}
-    .status{
-      display:grid;gap:8px;grid-template-columns:1fr;
-    }
-    @media(min-width:720px){.status{grid-template-columns:1fr 1fr 1fr}}
+    table{width:100%; border-collapse:collapse; min-width:720px;}
+    th,td{padding:8px 10px; border-bottom:1px solid rgba(255,255,255,.06); font-size:12px; white-space:nowrap;}
+    th{position:sticky; top:0; background: rgba(11,16,32,.85); text-align:left; z-index:2;}
+    .kpis{display:grid; gap:10px; grid-template-columns:1fr;}
+    @media (min-width: 720px){ .kpis{grid-template-columns:1fr 1fr 1fr;} }
     .kpi{
-      padding:12px;border-radius:14px;border:1px solid var(--border);
-      background:rgba(255,255,255,.06);
+      padding:12px; border-radius:14px; border:1px solid var(--border);
+      background: rgba(255,255,255,.06);
     }
-    .kpi .label{color:var(--muted);font-size:12px}
-    .kpi .value{font-size:18px;font-weight:900;margin-top:4px}
-    .two-col{display:grid;gap:14px;grid-template-columns:1fr}
-    @media(min-width:980px){.two-col{grid-template-columns:1fr 1fr}}
-    .canvas-wrap{
+    .kpi .label{color:var(--muted); font-size:12px;}
+    .kpi .value{font-size:18px; font-weight:900; margin-top:4px;}
+    .muted{color:var(--muted);}
+    .split{
+      display:grid; gap:14px; grid-template-columns:1fr;
+    }
+    @media (min-width: 980px){ .split{grid-template-columns: 1fr 1fr;} }
+    input[type="range"]{width:260px;}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
+    .box{
       border:1px solid var(--border);
       border-radius:12px;
       padding:10px;
-      background:rgba(11,16,32,.35);
-    }
-    canvas{width:100% !important;height:320px !important}
-    .small canvas{height:260px !important}
-    select{
-      padding:8px;border-radius:10px;border:1px solid var(--border);
-      background:rgba(11,16,32,.35);color:var(--text);
-    }
-    footer{
-      max-width:1200px;margin:0 auto;
-      padding:14px 16px 24px;
-      color:var(--muted);font-size:12px;line-height:1.6;
+      background: rgba(11,16,32,.35);
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Titanic EDA — browser-only (train.csv + test.csv → merged)</h1>
+    <h1>Titanic TF.js — Shallow Binary Classifier (Browser-only)</h1>
     <p>
-      Client-side CSV parsing via PapaParse + charts via Chart.js. No server, no build tools.
-      Upload Kaggle <b>train.csv</b> and <b>test.csv</b>, then run EDA.
+      Train a single-hidden-layer neural net in the browser using TensorFlow.js.
+      Upload Kaggle <b>train.csv</b> and <b>test.csv</b>, inspect data, preprocess, train, evaluate (ROC/AUC + threshold slider), predict, and export.
     </p>
   </header>
 
@@ -172,152 +130,138 @@
       </div>
 
       <div class="row" style="margin-top:10px;">
-        <button id="btnLoad">Load & Merge</button>
-        <button id="btnRun" class="secondary">Run EDA</button>
-        <button id="btnReset" class="danger">Reset</button>
-        <span class="pill" id="loadStatus"><b>Status:</b> waiting for files</span>
+        <button id="btnLoad">Load & Inspect</button>
+        <span class="pill" id="statusPill"><b>Status:</b> waiting for files</span>
+        <span class="pill"><b>Runtime:</b> tfjs + tfjs-vis</span>
       </div>
 
       <div class="note">
-        Create public GitHub repo, commit index.html/app.js, enable Pages (main/root), test URL.
+        <span class="hint">Deployment note:</span> Create public GitHub repo, commit <b>index.html</b>/<b>app.js</b>, enable Pages (main/root), test URL.
       </div>
     </section>
 
     <section>
-      <h2>Merge & Overview</h2>
-      <div class="status">
-        <div class="kpi"><div class="label">Merged Rows</div><div class="value" id="kpiRows">—</div></div>
-        <div class="kpi"><div class="label">Merged Columns</div><div class="value" id="kpiCols">—</div></div>
-        <div class="kpi"><div class="label">Train/Test Split</div><div class="value" id="kpiSplit">—</div></div>
+      <h2>Preprocessing</h2>
+      <div class="row">
+        <label><input type="checkbox" id="toggleFamily" checked /> Add FamilySize = SibSp + Parch + 1</label>
+        <label><input type="checkbox" id="toggleAlone" checked /> Add IsAlone = (FamilySize == 1)</label>
+        <button id="btnPreprocess" class="secondary">Run Preprocessing</button>
+        <span class="pill" id="prepPill"><b>Preprocess:</b> idle</span>
       </div>
-
-      <div class="hr"></div>
-
-      <div class="row" style="justify-content:space-between;">
-        <div class="muted">Preview (first N rows). Added column: <b>source</b> ∈ {train,test}</div>
-        <div class="row">
-          <label class="muted" for="previewRows">Preview rows:</label>
-          <select id="previewRows">
-            <option value="10">10</option>
-            <option value="12" selected>12</option>
-            <option value="25">25</option>
-            <option value="50">50</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="scroll" style="margin-top:10px;">
-        <table id="previewTable">
-          <thead></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section>
-      <h2>Missing Values</h2>
-      <div class="canvas-wrap">
-        <canvas id="missingChart"></canvas>
-      </div>
-      <div class="note" id="missingNote">—</div>
-    </section>
-
-    <section>
-      <h2>Stats Summary</h2>
-
-      <div class="two-col">
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Numeric stats (overall)</div>
-          <div class="scroll">
-            <table id="numericStatsTable"><thead></thead><tbody></tbody></table>
-          </div>
-        </div>
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Numeric stats (train grouped by Survived)</div>
-          <div class="scroll">
-            <table id="numericStatsBySurvivedTable"><thead></thead><tbody></tbody></table>
-          </div>
-        </div>
-      </div>
-
-      <div class="hr"></div>
-
-      <div class="two-col">
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Categorical counts (overall)</div>
-          <div class="scroll">
-            <table id="catCountsTable"><thead></thead><tbody></tbody></table>
-          </div>
-        </div>
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Categorical counts (train grouped by Survived)</div>
-          <div class="scroll">
-            <table id="catCountsBySurvivedTable"><thead></thead><tbody></tbody></table>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <h2>Visualizations</h2>
-
-      <div class="grid cols-3">
-        <div class="canvas-wrap small">
-          <div class="muted" style="margin:0 0 8px;">Sex (train survival rate)</div>
-          <canvas id="sexBar"></canvas>
-        </div>
-        <div class="canvas-wrap small">
-          <div class="muted" style="margin:0 0 8px;">Pclass (train survival rate)</div>
-          <canvas id="pclassBar"></canvas>
-        </div>
-        <div class="canvas-wrap small">
-          <div class="muted" style="margin:0 0 8px;">Embarked (train survival rate)</div>
-          <canvas id="embarkedBar"></canvas>
-        </div>
-      </div>
-
-      <div class="hr"></div>
-
-      <div class="grid cols-2">
-        <div class="canvas-wrap">
-          <div class="muted" style="margin:0 0 8px;">Age histogram (merged)</div>
-          <canvas id="ageHist"></canvas>
-        </div>
-        <div class="canvas-wrap">
-          <div class="muted" style="margin:0 0 8px;">Fare histogram (merged)</div>
-          <canvas id="fareHist"></canvas>
-        </div>
-      </div>
-
-      <div class="hr"></div>
-
-      <div class="canvas-wrap">
-        <div class="muted" style="margin:0 0 8px;">Correlation heatmap (bubble matrix) — numeric features (train only)</div>
-        <canvas id="corrHeatmap"></canvas>
-      </div>
-
       <div class="note">
-        Correlations use train rows (Survived exists only there). Bubble size = |corr|, color = sign/magnitude.
+        Impute <b>Age</b> (median) and <b>Embarked</b> (mode). Standardize <b>Age</b> and <b>Fare</b>. One-hot encode <b>Sex</b>, <b>Pclass</b>, <b>Embarked</b>.
+      </div>
+      <div class="box mono" id="prepLog" style="margin-top:10px; white-space:pre-wrap;">—</div>
+    </section>
+
+    <section>
+      <h2>Model</h2>
+      <div class="row">
+        <button id="btnBuildModel">Build Model</button>
+        <button id="btnSaveModel" class="secondary">Save Model</button>
+        <span class="pill" id="modelPill"><b>Model:</b> not built</span>
+      </div>
+      <div class="box mono" id="modelSummary" style="margin-top:10px; white-space:pre-wrap;">—</div>
+    </section>
+
+    <section>
+      <h2>Training</h2>
+      <div class="row">
+        <button id="btnTrain">Train</button>
+        <button id="btnEvaluate" class="secondary">Evaluate</button>
+        <span class="pill" id="trainPill"><b>Train:</b> idle</span>
+      </div>
+      <div class="note">
+        80/20 <b>stratified split</b>, 50 epochs, batch 32, early stopping on val_loss (patience=5). Live curves rendered via tfjs-vis.
+      </div>
+      <div class="split" style="margin-top:10px;">
+        <div class="box" id="visFit"></div>
+        <div class="box" id="visHistory"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Metrics (ROC-AUC slider)</h2>
+      <div class="row">
+        <label class="muted">Threshold:</label>
+        <input id="thresholdSlider" type="range" min="0" max="1" step="0.01" value="0.50"/>
+        <span class="pill"><b id="thresholdLabel">0.50</b></span>
+        <span class="pill" id="aucPill"><b>AUC:</b> —</span>
+      </div>
+      <div class="split" style="margin-top:10px;">
+        <div class="box" id="visROC"></div>
+        <div class="box">
+          <div class="muted" style="margin-bottom:8px;">Confusion Matrix + Performance</div>
+          <div class="scroll">
+            <table id="metricsTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="note muted">Slider updates confusion matrix + Precision/Recall/F1 using validation probabilities.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Prediction</h2>
+      <div class="row">
+        <button id="btnPredict">Predict Test</button>
+        <button id="btnExportSubmission" class="secondary">Download submission.csv</button>
+        <button id="btnExportProbs" class="secondary">Download probabilities.csv</button>
+        <span class="pill" id="predPill"><b>Predict:</b> idle</span>
+      </div>
+      <div class="note">
+        Predict probabilities for test.csv, then apply threshold to produce Survived (0/1). Exports both Kaggle submission and raw probabilities.
       </div>
     </section>
 
     <section>
       <h2>Export</h2>
       <div class="row">
-        <button id="btnExportCSV">Download merged CSV</button>
-        <button id="btnExportJSON" class="secondary">Download JSON summary</button>
-        <span class="pill" id="exportStatus"><b>Export:</b> idle</span>
+        <button id="btnExportDebug" class="secondary">Download preprocessing summary (JSON)</button>
+        <span class="pill" id="exportPill"><b>Export:</b> idle</span>
       </div>
       <div class="note muted">
-        Exports are generated in-browser: merged dataset → CSV, and an EDA summary → JSON.
+        Download JSON summary of preprocessing (imputation values, standardization params, one-hot categories, feature order).
+      </div>
+    </section>
+
+    <section>
+      <h2>Data Preview & Inspection</h2>
+      <div class="kpis">
+        <div class="kpi">
+          <div class="label">Train Rows / Cols</div>
+          <div class="value" id="kpiTrain">—</div>
+        </div>
+        <div class="kpi">
+          <div class="label">Test Rows / Cols</div>
+          <div class="value" id="kpiTest">—</div>
+        </div>
+        <div class="kpi">
+          <div class="label">Missingness (Top 3)</div>
+          <div class="value" id="kpiMissing">—</div>
+        </div>
+      </div>
+
+      <div class="split" style="margin-top:10px;">
+        <div>
+          <div class="muted" style="margin-bottom:8px;">Preview (first 10 rows of train)</div>
+          <div class="scroll">
+            <table id="previewTable">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div>
+          <div class="muted" style="margin-bottom:8px;">Quick EDA (train): Survived rate by Sex / Pclass</div>
+          <div class="box" id="visEDA"></div>
+        </div>
       </div>
     </section>
   </main>
-
-  <footer>
-    <b>Reusable note:</b> To use this app for other train/test split datasets, swap the schema in <b>app.js</b>
-    (identifier/target/features) and keep the same load/merge/EDA pipeline.
-  </footer>
 
   <script src="app.js"></script>
 </body>
