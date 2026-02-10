@@ -1,3 +1,4 @@
+```javascript
 // app.js
 // Browser-only Titanic shallow classifier using TensorFlow.js + tfjs-vis
 //
@@ -65,7 +66,7 @@
 
     visEDA: $("visEDA"),
     visFit: $("visFit"),
-    visHistory: $("visHistory"),
+    visHistory: $("visHistory"), // We'll reuse this area to render gate feature-importance chart.
     visROC: $("visROC"),
   };
 
@@ -135,6 +136,87 @@
       threshold: 0.5,
     },
   };
+
+  // ----------------------------
+  // (HW2 Task 4) Sigmoid Gate (Mask) Layer for Feature Importance
+  // ----------------------------
+  // Learns a per-feature gate g = sigmoid(w), then outputs x * g (Hadamard product).
+  // Gate values are directly interpretable as feature importance (0..1).
+  class SigmoidGate extends tf.layers.Layer {
+    constructor(config) {
+      super(config || {});
+      this.supportsMasking = true;
+    }
+
+    build(inputShape) {
+      const inputDim = inputShape[inputShape.length - 1];
+      // Trainable logits; sigmoid(logit)=0.5 at init.
+      this.w = this.addWeight(
+        "gate_logits",
+        [inputDim],
+        "float32",
+        tf.initializers.zeros(),
+        // Optional L1 regularization encourages sparsity for clearer importance.
+        tf.regularizers.l1({ l1: 1e-3 })
+      );
+      this.built = true;
+    }
+
+    call(inputs) {
+      return tf.tidy(() => {
+        const x = Array.isArray(inputs) ? inputs[0] : inputs; // [batch, d]
+        const g = tf.sigmoid(this.w.read()); // [d], values in (0,1)
+        return x.mul(g); // broadcast multiply -> masked input
+      });
+    }
+
+    computeOutputShape(inputShape) {
+      return inputShape;
+    }
+
+    getConfig() {
+      const base = super.getConfig();
+      return { ...base };
+    }
+
+    static get className() {
+      return "SigmoidGate";
+    }
+  }
+  tf.serialization.registerClass(SigmoidGate);
+
+  function renderGateImportance() {
+    if (!state.model || !state.prep.featureNames?.length) return;
+
+    let gateLayer;
+    try {
+      gateLayer = state.model.getLayer("sigmoid_gate");
+    } catch {
+      return;
+    }
+    if (!gateLayer) return;
+
+    // gate logits -> sigmoid -> importance
+    const logits = gateLayer.getWeights()[0]; // tensor [d]
+    const imp = tf.sigmoid(logits).dataSync(); // Float32Array length d
+
+    const items = state.prep.featureNames
+      .map((name, i) => ({ x: name, y: Number(imp[i]) }))
+      .sort((a, b) => b.y - a.y);
+
+    // Render into the right-side training panel (visHistory)
+    el.visHistory.innerHTML = "";
+    tfvis.render.barchart(
+      el.visHistory,
+      items,
+      {
+        title: "Sigmoid Gate Feature Importance (0..1)",
+        xLabel: "Feature",
+        yLabel: "Gate value",
+        height: 360,
+      }
+    );
+  }
 
   // ----------------------------
   // CSV Loading (safe CSV parsing without comma-escape bugs)
@@ -350,12 +432,12 @@
     // tfjs-vis bar charts
     tfvis.render.barchart(
       el.visEDA,
-      bySex.map(d => ({ x: d.key, y: d.rate })),
+      bySex.map((d) => ({ x: d.key, y: d.rate })),
       { title: "Survival rate by Sex (train)", xLabel: "Sex", yLabel: "Survival rate (%)" }
     );
     tfvis.render.barchart(
       el.visEDA,
-      byPclass.map(d => ({ x: d.key, y: d.rate })),
+      byPclass.map((d) => ({ x: d.key, y: d.rate })),
       { title: "Survival rate by Pclass (train)", xLabel: "Pclass", yLabel: "Survival rate (%)" }
     );
   }
@@ -366,7 +448,10 @@
 
     const miss = missingPct(trainRows);
     state.inspect.missingPct = miss;
-    const top3 = miss.slice(0, 3).map(d => `${d.col} ${d.pct.toFixed(1)}%`).join(" • ");
+    const top3 = miss
+      .slice(0, 3)
+      .map((d) => `${d.col} ${d.pct.toFixed(1)}%`)
+      .join(" • ");
     el.kpiMissing.textContent = top3 || "—";
   }
 
@@ -387,9 +472,13 @@
       const k = String(v);
       map.set(k, (map.get(k) || 0) + 1);
     }
-    let best = null, bestN = -1;
+    let best = null,
+      bestN = -1;
     for (const [k, n] of map.entries()) {
-      if (n > bestN) { bestN = n; best = k; }
+      if (n > bestN) {
+        bestN = n;
+        best = k;
+      }
     }
     return best;
   }
@@ -407,7 +496,8 @@
     if (useFamily || useAlone) {
       const sib = Number(out.SibSp);
       const par = Number(out.Parch);
-      const familySize = (Number.isFinite(sib) ? sib : 0) + (Number.isFinite(par) ? par : 0) + 1;
+      const familySize =
+        (Number.isFinite(sib) ? sib : 0) + (Number.isFinite(par) ? par : 0) + 1;
       if (useFamily) out.FamilySize = familySize;
       if (useAlone) out.IsAlone = familySize === 1 ? 1 : 0;
     }
@@ -416,24 +506,37 @@
 
   function fitPreprocessParams(trainRows) {
     // Impute Age median
-    const ages = trainRows.map(r => r.Age).filter(v => typeof v === "number" && Number.isFinite(v));
+    const ages = trainRows
+      .map((r) => r.Age)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
     const ageMedian = median(ages);
 
     // Embarked mode (categorical)
-    const embarkedMode = mode(trainRows.map(r => r.Embarked));
+    const embarkedMode = mode(trainRows.map((r) => r.Embarked));
 
     // For standardization: compute on train AFTER imputation
-    const imputedAges = trainRows.map(r => (typeof r.Age === "number" ? r.Age : ageMedian)).filter(v => typeof v === "number");
-    const fares = trainRows.map(r => r.Fare).filter(v => typeof v === "number" && Number.isFinite(v));
+    const imputedAges = trainRows
+      .map((r) => (typeof r.Age === "number" ? r.Age : ageMedian))
+      .filter((v) => typeof v === "number");
+    const fares = trainRows
+      .map((r) => r.Fare)
+      .filter((v) => typeof v === "number" && Number.isFinite(v));
 
     const ageMS = meanStd(imputedAges);
     const fareMS = meanStd(fares);
 
     // One-hot categories fit on train
-    const sexCats = [...new Set(trainRows.map(r => String(r.Sex)).filter(v => v && v !== "undefined"))].sort();
-    const pclassCats = [...new Set(trainRows.map(r => String(r.Pclass)).filter(v => v && v !== "undefined"))]
-      .sort((a,b) => Number(a) - Number(b));
-    const embarkedCats = [...new Set(trainRows.map(r => String(r.Embarked || embarkedMode)).filter(v => v && v !== "undefined"))].sort();
+    const sexCats = [...new Set(trainRows.map((r) => String(r.Sex)).filter((v) => v && v !== "undefined"))].sort();
+    const pclassCats = [
+      ...new Set(trainRows.map((r) => String(r.Pclass)).filter((v) => v && v !== "undefined")),
+    ].sort((a, b) => Number(a) - Number(b));
+    const embarkedCats = [
+      ...new Set(
+        trainRows
+          .map((r) => String(r.Embarked || embarkedMode))
+          .filter((v) => v && v !== "undefined")
+      ),
+    ].sort();
 
     return {
       ageMedian,
@@ -490,8 +593,8 @@
       ids.push(pid);
 
       // Impute
-      const age = (typeof r.Age === "number" && Number.isFinite(r.Age)) ? r.Age : params.ageMedian;
-      const embarked = (!isMissing(r.Embarked)) ? r.Embarked : params.embarkedMode;
+      const age = typeof r.Age === "number" && Number.isFinite(r.Age) ? r.Age : params.ageMedian;
+      const embarked = !isMissing(r.Embarked) ? r.Embarked : params.embarkedMode;
 
       // Standardize Age/Fare
       const ageZ = zscore(Number(age), params.ageMean, params.ageStd);
@@ -540,8 +643,8 @@
 
     // deterministic shuffle
     function mulberry32(a) {
-      return function() {
-        let t = a += 0x6D2B79F5;
+      return function () {
+        let t = (a += 0x6d2b79f5);
         t = Math.imul(t ^ (t >>> 15), t | 1);
         t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
         return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -555,7 +658,8 @@
         [arr[i], arr[j]] = [arr[j], arr[i]];
       }
     }
-    shuffle(idx0); shuffle(idx1);
+    shuffle(idx0);
+    shuffle(idx1);
 
     const nVal0 = Math.floor(idx0.length * valFrac);
     const nVal1 = Math.floor(idx1.length * valFrac);
@@ -564,12 +668,13 @@
     const trainIdx = idx0.slice(nVal0).concat(idx1.slice(nVal1));
 
     // shuffle combined (not necessary but nice)
-    shuffle(valIdx); shuffle(trainIdx);
+    shuffle(valIdx);
+    shuffle(trainIdx);
 
-    const Xtrain = trainIdx.map(i => X[i]);
-    const ytrain = trainIdx.map(i => y[i]);
-    const Xval = valIdx.map(i => X[i]);
-    const yval = valIdx.map(i => y[i]);
+    const Xtrain = trainIdx.map((i) => X[i]);
+    const ytrain = trainIdx.map((i) => y[i]);
+    const Xval = valIdx.map((i) => X[i]);
+    const yval = valIdx.map((i) => y[i]);
 
     return { Xtrain, ytrain, Xval, yval };
   }
@@ -588,8 +693,16 @@
     const params = fitPreprocessParams(state.raw.trainRows);
 
     // Build matrices
-    const train = preprocessRows(state.raw.trainRows, params, { useFamily, useAlone, includeTarget: true });
-    const test = preprocessRows(state.raw.testRows, params, { useFamily, useAlone, includeTarget: false });
+    const train = preprocessRows(state.raw.trainRows, params, {
+      useFamily,
+      useAlone,
+      includeTarget: true,
+    });
+    const test = preprocessRows(state.raw.testRows, params, {
+      useFamily,
+      useAlone,
+      includeTarget: false,
+    });
 
     // Stratified split
     const split = stratifiedSplit(train.X, train.y, 0.2, 42);
@@ -611,7 +724,7 @@
         },
         onehot: params.cats,
         featureNames: train.featureNames,
-      }
+      },
     };
 
     // Tensors
@@ -651,10 +764,18 @@
   // Model
   // ----------------------------
   function buildModel(inputDim) {
-    // Shallow binary classifier: Dense(16,relu) -> Dense(1,sigmoid)
-    const model = tf.sequential();
-    model.add(tf.layers.dense({ units: 16, activation: "relu", inputShape: [inputDim] }));
-    model.add(tf.layers.dense({ units: 1, activation: "sigmoid" }));
+    // (HW2 Task 4) Add Sigmoid gate to interpret feature importance.
+    // Functional API: Input -> SigmoidGate -> Dense(16,relu) -> Dense(1,sigmoid)
+    const input = tf.input({ shape: [inputDim], name: "features" });
+    const gated = new SigmoidGate({ name: "sigmoid_gate" }).apply(input);
+    const hidden = tf.layers.dense({ units: 16, activation: "relu", name: "hidden" }).apply(gated);
+    const output = tf.layers.dense({ units: 1, activation: "sigmoid", name: "output" }).apply(hidden);
+
+    const model = tf.model({
+      inputs: input,
+      outputs: output,
+      name: "titanic_shallow_with_gate",
+    });
 
     model.compile({
       optimizer: tf.train.adam(),
@@ -713,7 +834,7 @@
           best = valLoss;
           wait = 0;
           // clone weights
-          bestWeights = state.model.getWeights().map(w => w.clone());
+          bestWeights = state.model.getWeights().map((w) => w.clone());
         } else {
           wait++;
           if (wait >= patience) {
@@ -725,8 +846,8 @@
       },
       onTrainEnd: async () => {
         // dispose best weights clones
-        if (bestWeights) bestWeights.forEach(w => w.dispose());
-      }
+        if (bestWeights) bestWeights.forEach((w) => w.dispose());
+      },
     };
   }
 
@@ -746,15 +867,10 @@
     el.visFit.innerHTML = "";
     el.visHistory.innerHTML = "";
 
-    const fitSurface = { name: "Training", tab: "Fit" };
-    const metricsSurface = { name: "History", tab: "Fit" };
-
     // tfjs-vis fit callbacks
-    const fitCallbacks = tfvis.show.fitCallbacks(
-      el.visFit,
-      ["loss", "acc", "val_loss", "val_acc"],
-      { callbacks: ["onEpochEnd"] }
-    );
+    const fitCallbacks = tfvis.show.fitCallbacks(el.visFit, ["loss", "acc", "val_loss", "val_acc"], {
+      callbacks: ["onEpochEnd"],
+    });
 
     const es = earlyStopping(5);
 
@@ -766,13 +882,20 @@
         onEpochEnd: async (epoch, logs) => {
           await fitCallbacks.onEpochEnd(epoch, logs);
           await es.onEpochEnd(epoch, logs);
-          setPill(el.trainPill, "Train", `epoch ${epoch + 1}/50 loss=${logs.loss.toFixed(4)} val_loss=${logs.val_loss.toFixed(4)}`);
+          setPill(
+            el.trainPill,
+            "Train",
+            `epoch ${epoch + 1}/50 loss=${logs.loss.toFixed(4)} val_loss=${logs.val_loss.toFixed(4)}`
+          );
         },
         onTrainEnd: async (logs) => {
           await es.onTrainEnd(logs);
-        }
-      }
+        },
+      },
     });
+
+    // After training, render feature importance from the sigmoid gate (HW2 Task 4).
+    renderGateImportance();
 
     setPill(el.trainPill, "Train", "done ✅");
   }
@@ -797,7 +920,10 @@
     const fpr = [];
     for (let i = 0; i < steps; i++) {
       const thr = i / (steps - 1);
-      let tp = 0, fp = 0, tn = 0, fn = 0;
+      let tp = 0,
+        fp = 0,
+        tn = 0,
+        fn = 0;
       for (let j = 0; j < labels.length; j++) {
         const pred = probs[j] >= thr ? 1 : 0;
         const y = labels[j];
@@ -826,7 +952,10 @@
   }
 
   function confusionAndPRF1(labels, probs, threshold) {
-    let tp = 0, fp = 0, tn = 0, fn = 0;
+    let tp = 0,
+      fp = 0,
+      tn = 0,
+      fn = 0;
     for (let i = 0; i < labels.length; i++) {
       const pred = probs[i] >= threshold ? 1 : 0;
       const y = labels[i];
@@ -935,6 +1064,9 @@
     const m = confusionAndPRF1(labels, probs, thr);
     renderMetricsTable(m);
 
+    // Also show gate importance here (useful if user presses Evaluate after training).
+    renderGateImportance();
+
     setPill(el.trainPill, "Train", "evaluation ready ✅");
   }
 
@@ -1031,7 +1163,10 @@
       return;
     }
     const json = JSON.stringify(state.prep.summary, null, 2);
-    downloadBlob("preprocessing_summary.json", new Blob([json], { type: "application/json;charset=utf-8" }));
+    downloadBlob(
+      "preprocessing_summary.json",
+      new Blob([json], { type: "application/json;charset=utf-8" })
+    );
     setPill(el.exportPill, "Export", "preprocessing_summary.json downloaded ✅");
   }
 
@@ -1091,3 +1226,4 @@
 
   init();
 })();
+```
