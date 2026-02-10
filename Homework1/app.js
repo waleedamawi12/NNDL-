@@ -103,6 +103,20 @@
   }
 
   // -----------------------------
+  // Show JS errors on the page (so failures are not silent)
+  // -----------------------------
+  window.addEventListener("error", (e) => {
+    const msg = e?.message || "Unknown JS error";
+    console.error(e);
+    try { setStatus(`JS error: ${msg}`); } catch (_) {}
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const msg = e?.reason?.message || String(e?.reason || "Promise rejected");
+    console.error(e);
+    try { setStatus(`Promise error: ${msg}`); } catch (_) {}
+  });
+
+  // -----------------------------
   // CSV parsing (PapaParse)
   // -----------------------------
   function parseCsvFile(file) {
@@ -125,9 +139,7 @@
     });
   }
 
-  // -----------------------------
-  // NEW: CSV parsing from URL (repo auto-load)
-  // -----------------------------
+  // CSV parsing from URL (repo auto-load)
   function parseCsvUrl(url) {
     return new Promise((resolve, reject) => {
       Papa.parse(url, {
@@ -524,7 +536,6 @@
     });
   }
 
-  // Correlation helpers
   function pearson(x, y) {
     const n = x.length;
     if (n < 2) return null;
@@ -567,7 +578,7 @@
   function corrColor(c) {
     if (c === null || c === undefined || !Number.isFinite(c)) return "rgba(255,255,255,0.10)";
     const v = Math.max(-1, Math.min(1, c));
-    const hue = v >= 0 ? 220 : 0; // blue for positive, red for negative
+    const hue = v >= 0 ? 220 : 0;
     const alpha = 0.15 + 0.65 * Math.abs(v);
     return `hsla(${hue}, 90%, 60%, ${alpha})`;
   }
@@ -645,9 +656,6 @@
     });
   }
 
-  // -----------------------------
-  // Summary (for JSON export)
-  // -----------------------------
   function buildSummary(rows) {
     const cols = getColumns(rows);
     const split = computeSplit(rows);
@@ -684,9 +692,6 @@
     };
   }
 
-  // -----------------------------
-  // Grouped tables renderers
-  // -----------------------------
   function renderGroupedNumericTable(tableEl, stats0, stats1) {
     const thead = tableEl.querySelector("thead");
     const tbody = tableEl.querySelector("tbody");
@@ -797,9 +802,6 @@
     }
   }
 
-  // -----------------------------
-  // Export
-  // -----------------------------
   function downloadBlob(filename, blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -855,7 +857,6 @@
     try {
       let trainRows, testRows;
 
-      // Use uploads if both provided
       if (trainFile && testFile) {
         setStatus("parsing uploaded CSV files…");
         [trainRows, testRows] = await Promise.all([
@@ -863,7 +864,6 @@
           parseCsvFile(testFile),
         ]);
       } else {
-        // Otherwise auto-load from repo
         setStatus("auto-loading CSVs from repo…");
         [trainRows, testRows] = await Promise.all([
           parseCsvUrl("Homework1/train.csv"),
@@ -979,9 +979,6 @@
     setExportStatus("idle");
   }
 
-  // -----------------------------
-  // Events
-  // -----------------------------
   function init() {
     el.btnLoad.addEventListener("click", loadAndMerge);
     el.btnRun.addEventListener("click", runEDA);
@@ -1003,6 +1000,9 @@
     el.testFile.addEventListener("change", maybeAutoStatus);
 
     resetAll();
+
+    // Auto-load immediately (repo auto-load path runs because no files are selected)
+    loadAndMerge();
   }
 
   init();
