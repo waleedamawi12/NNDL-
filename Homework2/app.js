@@ -1,173 +1,293 @@
 // app.js
-// Browser-only Titanic EDA (GitHub Pages deployable)
+// Browser-only Titanic shallow classifier using TensorFlow.js + tfjs-vis
 //
-// Uses:
-// - PapaParse for robust CSV parsing (handles commas inside quotes correctly)
-// - Chart.js for charts
-//
-// Reuse note:
-// To reuse this for other datasets split into train/test, change SCHEMA below
-// and adjust feature lists / target name as needed.
+// Reusable note (schema swap):
+// Change SCHEMA.target/features/identifier and update preprocessOneHot() mapping if using another dataset.
+// This file supports loading via file input. (Fetch-based loading could be added for repo-hosted CSVs.)
 
 (() => {
   "use strict";
 
-  // -----------------------------
+  // ----------------------------
   // Schema (swap here for other datasets)
-  // -----------------------------
+  // ----------------------------
   const SCHEMA = {
-    target: "Survived", // label (train only)
+    identifier: "PassengerId",
+    target: "Survived",
     features: ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"],
-    identifier: "PassengerId", // exclude from stats/corr
   };
 
-  // -----------------------------
-  // State
-  // -----------------------------
-  const state = {
-    train: null,
-    test: null,
-    merged: null,
-    summary: null,
-    charts: {
-      missing: null,
-      sex: null,
-      pclass: null,
-      embarked: null,
-      ageHist: null,
-      fareHist: null,
-      corr: null,
-    },
-  };
-
-  // -----------------------------
+  // ----------------------------
   // DOM
-  // -----------------------------
+  // ----------------------------
   const $ = (id) => document.getElementById(id);
 
   const el = {
     trainFile: $("trainFile"),
     testFile: $("testFile"),
     btnLoad: $("btnLoad"),
-    btnRun: $("btnRun"),
-    btnReset: $("btnReset"),
-    loadStatus: $("loadStatus"),
 
-    kpiRows: $("kpiRows"),
-    kpiCols: $("kpiCols"),
-    kpiSplit: $("kpiSplit"),
+    toggleFamily: $("toggleFamily"),
+    toggleAlone: $("toggleAlone"),
+    btnPreprocess: $("btnPreprocess"),
+    prepPill: $("prepPill"),
+    prepLog: $("prepLog"),
 
-    previewRows: $("previewRows"),
+    btnBuildModel: $("btnBuildModel"),
+    btnSaveModel: $("btnSaveModel"),
+    modelPill: $("modelPill"),
+    modelSummary: $("modelSummary"),
+
+    btnTrain: $("btnTrain"),
+    btnEvaluate: $("btnEvaluate"),
+    trainPill: $("trainPill"),
+
+    thresholdSlider: $("thresholdSlider"),
+    thresholdLabel: $("thresholdLabel"),
+    aucPill: $("aucPill"),
+    metricsTable: $("metricsTable"),
+
+    btnPredict: $("btnPredict"),
+    btnExportSubmission: $("btnExportSubmission"),
+    btnExportProbs: $("btnExportProbs"),
+    predPill: $("predPill"),
+
+    btnExportDebug: $("btnExportDebug"),
+    exportPill: $("exportPill"),
+
+    statusPill: $("statusPill"),
+
+    kpiTrain: $("kpiTrain"),
+    kpiTest: $("kpiTest"),
+    kpiMissing: $("kpiMissing"),
+
     previewTable: $("previewTable"),
 
-    missingChart: $("missingChart"),
-    missingNote: $("missingNote"),
-
-    numericStatsTable: $("numericStatsTable"),
-    numericStatsBySurvivedTable: $("numericStatsBySurvivedTable"),
-    catCountsTable: $("catCountsTable"),
-    catCountsBySurvivedTable: $("catCountsBySurvivedTable"),
-
-    sexBar: $("sexBar"),
-    pclassBar: $("pclassBar"),
-    embarkedBar: $("embarkedBar"),
-    ageHist: $("ageHist"),
-    fareHist: $("fareHist"),
-    corrHeatmap: $("corrHeatmap"),
-
-    btnExportCSV: $("btnExportCSV"),
-    btnExportJSON: $("btnExportJSON"),
-    exportStatus: $("exportStatus"),
+    visEDA: $("visEDA"),
+    visFit: $("visFit"),
+    visHistory: $("visHistory"),
+    visROC: $("visROC"),
   };
 
-  // -----------------------------
-  // UI helpers
-  // -----------------------------
-  function escapeHtml(str) {
-    return String(str)
+  function setPill(pillEl, label, value) {
+    pillEl.innerHTML = `<b>${escapeHtml(label)}:</b> ${escapeHtml(value)}`;
+  }
+  function escapeHtml(s) {
+    return String(s)
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
   }
-
-  function setStatus(text) {
-    el.loadStatus.innerHTML = `<b>Status:</b> ${escapeHtml(text)}`;
-  }
-
-  function setExportStatus(text) {
-    el.exportStatus.innerHTML = `<b>Export:</b> ${escapeHtml(text)}`;
-  }
-
   function alertUser(msg) {
     window.alert(msg);
   }
 
-  // -----------------------------
-  // Parsing (PapaParse)
-  // -----------------------------
-  function parseCsvFile(file) {
-    // PapaParse configured to correctly handle:
-    // - commas inside quoted strings (e.g., Name column)
-    // - numeric typing where possible
-    return new Promise((resolve, reject) => {
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        quotes: true,        // important for comma-in-quotes correctness
-        dynamicTyping: true, // convert numeric fields where possible
-        complete: (results) => {
-          if (results.errors && results.errors.length) {
-            console.error("PapaParse errors:", results.errors);
-            reject(new Error(results.errors[0].message || "CSV parse error"));
-            return;
-          }
-          resolve(results.data);
-        },
-        error: (err) => reject(err),
-      });
+  // ----------------------------
+  // State
+  // ----------------------------
+  const state = {
+    raw: {
+      trainRows: null,
+      testRows: null,
+    },
+    inspect: {
+      missingPct: null,
+    },
+    prep: {
+      // Learned preprocessing parameters
+      ageMedian: null,
+      embarkedMode: null,
+      ageMean: null,
+      ageStd: null,
+      fareMean: null,
+      fareStd: null,
+      // Categories for one-hot (fit on train, apply to both)
+      cats: {
+        Sex: [],
+        Pclass: [],
+        Embarked: [],
+      },
+      // Feature order after one-hot + engineered
+      featureNames: [],
+      // Debug summary object (for export)
+      summary: null,
+    },
+    tensors: {
+      xTrain: null,
+      yTrain: null,
+      xVal: null,
+      yVal: null,
+      xTest: null,
+      testPassengerIds: null,
+    },
+    model: null,
+    eval: {
+      // Cached validation probabilities + labels for threshold slider updates
+      valProbs: null, // Float32Array
+      valLabels: null, // Int32Array
+      auc: null,
+      roc: null, // {fpr:[], tpr:[]}
+    },
+    pred: {
+      testProbs: null, // Float32Array
+      threshold: 0.5,
+    },
+  };
+
+  // ----------------------------
+  // CSV Loading (safe CSV parsing without comma-escape bugs)
+  // ----------------------------
+  // IMPORTANT: We do not use naive split(',') parsing. That breaks on quoted commas (e.g. Name field).
+  // We implement a small RFC4180-ish parser here to handle quotes correctly.
+  // If you want, you can swap this out for PapaParse (not required in HW2 prompt).
+  function parseCSVText(text) {
+    const rows = [];
+    let row = [];
+    let field = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      const next = text[i + 1];
+
+      if (inQuotes) {
+        if (c === '"' && next === '"') {
+          field += '"'; // escaped quote
+          i++;
+        } else if (c === '"') {
+          inQuotes = false;
+        } else {
+          field += c;
+        }
+      } else {
+        if (c === '"') {
+          inQuotes = true;
+        } else if (c === ",") {
+          row.push(field);
+          field = "";
+        } else if (c === "\n") {
+          row.push(field);
+          field = "";
+          // ignore possible \r already removed or handle it
+          rows.push(row);
+          row = [];
+        } else if (c === "\r") {
+          // ignore
+        } else {
+          field += c;
+        }
+      }
+    }
+    // last field
+    row.push(field);
+    rows.push(row);
+
+    // Convert to objects using header row
+    const header = rows[0];
+    const out = [];
+    for (let r = 1; r < rows.length; r++) {
+      if (rows[r].length === 1 && rows[r][0] === "") continue; // skip empty last line
+      const obj = {};
+      for (let c = 0; c < header.length; c++) {
+        obj[header[c]] = rows[r][c] ?? "";
+      }
+      out.push(obj);
+    }
+    return out;
+  }
+
+  async function readFileAsText(file) {
+    return await file.text();
+  }
+
+  function dynamicType(v) {
+    // Convert strings to numbers when appropriate; keep empty as ""
+    if (v === null || v === undefined) return "";
+    const s = String(v).trim();
+    if (s === "") return "";
+    // Kaggle has "NaN" sometimes; treat as empty
+    if (s.toLowerCase() === "nan") return "";
+    const n = Number(s);
+    if (Number.isFinite(n) && s !== "") return n;
+    return s;
+  }
+
+  function typeRows(rows) {
+    // Convert each field with dynamicType
+    return rows.map((r) => {
+      const o = {};
+      for (const k of Object.keys(r)) o[k] = dynamicType(r[k]);
+      return o;
     });
   }
 
-  // -----------------------------
-  // Merge train/test (add source column)
-  // -----------------------------
-  function normalizeRows(rows, sourceLabel) {
-    return rows.map((r) => ({ ...r, source: sourceLabel }));
+  async function loadFromFileInputs() {
+    const trainFile = el.trainFile.files?.[0];
+    const testFile = el.testFile.files?.[0];
+    if (!trainFile || !testFile) {
+      alertUser("Please upload both train.csv and test.csv.");
+      return null;
+    }
+
+    try {
+      setPill(el.statusPill, "Status", "loading CSV…");
+
+      const [trainText, testText] = await Promise.all([
+        readFileAsText(trainFile),
+        readFileAsText(testFile),
+      ]);
+
+      // Robust parsing with quote handling fixes "comma escape problem"
+      const trainRows = typeRows(parseCSVText(trainText));
+      const testRows = typeRows(parseCSVText(testText));
+
+      if (!trainRows.length || !testRows.length) throw new Error("CSV appears empty.");
+      if (!(SCHEMA.target in trainRows[0])) {
+        throw new Error(`train.csv must contain target column "${SCHEMA.target}".`);
+      }
+
+      state.raw.trainRows = trainRows;
+      state.raw.testRows = testRows;
+
+      setPill(el.statusPill, "Status", "loaded ✅");
+      return { trainRows, testRows };
+    } catch (e) {
+      console.error(e);
+      alertUser(`Load failed: ${e.message || e}`);
+      setPill(el.statusPill, "Status", "load failed");
+      return null;
+    }
   }
 
-  function mergeDatasets(trainRows, testRows) {
-    // Train has target column, test typically does not.
-    // We keep all columns and add `source` to distinguish them.
-    return normalizeRows(trainRows, "train").concat(normalizeRows(testRows, "test"));
-  }
-
-  // -----------------------------
-  // Overview
-  // -----------------------------
+  // ----------------------------
+  // Inspection: preview, shape, missing %, survival charts
+  // ----------------------------
   function getColumns(rows) {
-    const s = new Set();
-    for (const r of rows) Object.keys(r).forEach((k) => s.add(k));
-    return Array.from(s);
+    const set = new Set();
+    for (const r of rows) Object.keys(r).forEach((k) => set.add(k));
+    return [...set];
   }
 
-  function computeSplit(rows) {
-    let train = 0, test = 0;
-    for (const r of rows) (r.source === "train" ? train++ : test++);
-    return { train, test };
+  function isMissing(v) {
+    return v === "" || v === null || v === undefined;
   }
 
-  function renderKPIs(rows) {
+  function missingPct(rows) {
     const cols = getColumns(rows);
-    const split = computeSplit(rows);
-    el.kpiRows.textContent = String(rows.length);
-    el.kpiCols.textContent = String(cols.length);
-    el.kpiSplit.textContent = `${split.train} / ${split.test}`;
+    const total = rows.length;
+    const miss = {};
+    cols.forEach((c) => (miss[c] = 0));
+    for (const r of rows) {
+      for (const c of cols) if (isMissing(r[c])) miss[c] += 1;
+    }
+    const arr = cols.map((c) => ({ col: c, pct: total ? (miss[c] / total) * 100 : 0 }));
+    arr.sort((a, b) => b.pct - a.pct);
+    return arr;
   }
 
-  function renderPreviewTable(rows) {
-    const n = Math.max(1, Number(el.previewRows.value || 12));
+  function renderPreviewTable(rows, n = 10) {
     const sample = rows.slice(0, n);
     const cols = getColumns(sample);
 
@@ -177,561 +297,688 @@
     tbody.innerHTML = "";
 
     const trh = document.createElement("tr");
-    for (const c of cols) {
+    cols.forEach((c) => {
       const th = document.createElement("th");
       th.textContent = c;
       trh.appendChild(th);
-    }
+    });
     thead.appendChild(trh);
 
-    for (const r of sample) {
+    sample.forEach((r) => {
       const tr = document.createElement("tr");
-      for (const c of cols) {
+      cols.forEach((c) => {
         const td = document.createElement("td");
         const v = r[c];
-        td.textContent = v === null || v === undefined || v === "" ? "—" : String(v);
-        tr.appendChild(td);
-      }
-      tbody.appendChild(tr);
-    }
-  }
-
-  // -----------------------------
-  // Missing values
-  // -----------------------------
-  function isMissing(v) {
-    return v === null || v === undefined || v === "";
-  }
-
-  function missingness(rows) {
-    const cols = getColumns(rows);
-    const total = rows.length;
-    const counts = Object.fromEntries(cols.map((c) => [c, 0]));
-
-    for (const r of rows) {
-      for (const c of cols) {
-        if (isMissing(r[c])) counts[c] += 1;
-      }
-    }
-
-    const pct = cols.map((c) => ({
-      col: c,
-      missing: counts[c],
-      pct: total ? (counts[c] / total) * 100 : 0,
-    }));
-
-    pct.sort((a, b) => b.pct - a.pct);
-    return pct;
-  }
-
-  function destroyChart(ref) {
-    if (ref && typeof ref.destroy === "function") ref.destroy();
-    return null;
-  }
-
-  function renderMissingChart(rows) {
-    const miss = missingness(rows);
-    const labels = miss.map((d) => d.col);
-    const values = miss.map((d) => Number(d.pct.toFixed(2)));
-
-    state.charts.missing = destroyChart(state.charts.missing);
-
-    state.charts.missing = new Chart(el.missingChart, {
-      type: "bar",
-      data: {
-        labels,
-        datasets: [{ label: "Missing (%)", data: values }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: {
-          y: { beginAtZero: true, max: 100, ticks: { callback: (v) => `${v}%` } },
-        },
-        plugins: {
-          legend: { display: false },
-          tooltip: { callbacks: { label: (ctx) => `${ctx.raw}% missing` } },
-        },
-      },
-    });
-
-    const top = miss.slice(0, 5).map((d) => `${d.col}: ${d.pct.toFixed(1)}%`).join(" • ");
-    el.missingNote.textContent = miss.length ? `Top missing columns: ${top}` : "No data loaded.";
-  }
-
-  // -----------------------------
-  // Stats (numeric + categorical)
-  // -----------------------------
-  function toNumberOrNull(v) {
-    if (isMissing(v)) return null;
-    const num = Number(v);
-    return Number.isFinite(num) ? num : null;
-  }
-
-  function mean(arr) {
-    if (!arr.length) return null;
-    let s = 0;
-    for (const x of arr) s += x;
-    return s / arr.length;
-  }
-
-  function median(arr) {
-    if (!arr.length) return null;
-    const a = [...arr].sort((x, y) => x - y);
-    const mid = Math.floor(a.length / 2);
-    return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
-  }
-
-  function std(arr) {
-    if (arr.length < 2) return null;
-    const m = mean(arr);
-    let s2 = 0;
-    for (const x of arr) s2 += (x - m) ** 2;
-    return Math.sqrt(s2 / (arr.length - 1));
-  }
-
-  function roundMaybe(v, digits = 4) {
-    if (v === null || v === undefined) return "—";
-    if (typeof v !== "number" || !Number.isFinite(v)) return "—";
-    const factor = 10 ** digits;
-    return String(Math.round(v * factor) / factor);
-  }
-
-  function numericStats(rows, numericCols) {
-    return numericCols.map((c) => {
-      const vals = rows.map((r) => toNumberOrNull(r[c])).filter((v) => v !== null);
-      return { feature: c, n: vals.length, mean: mean(vals), median: median(vals), std: std(vals) };
-    });
-  }
-
-  function renderNumericStatsTable(tableEl, stats) {
-    const thead = tableEl.querySelector("thead");
-    const tbody = tableEl.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    const header = ["Feature", "N", "Mean", "Median", "Std"];
-    const trh = document.createElement("tr");
-    header.forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-
-    for (const s of stats) {
-      const tr = document.createElement("tr");
-      [s.feature, String(s.n), roundMaybe(s.mean), roundMaybe(s.median), roundMaybe(s.std)].forEach((c) => {
-        const td = document.createElement("td");
-        td.textContent = c;
+        td.textContent = isMissing(v) ? "—" : String(v);
         tr.appendChild(td);
       });
       tbody.appendChild(tr);
-    }
-  }
-
-  function categoricalCounts(rows, catCols, topK = 10) {
-    const result = [];
-    for (const c of catCols) {
-      const map = new Map();
-      let nonMissing = 0;
-      for (const r of rows) {
-        const v = r[c];
-        if (isMissing(v)) continue;
-        nonMissing++;
-        const key = String(v);
-        map.set(key, (map.get(key) || 0) + 1);
-      }
-      const counts = Array.from(map.entries())
-        .map(([value, n]) => ({ value, n, pct: nonMissing ? (n / nonMissing) * 100 : 0 }))
-        .sort((a, b) => b.n - a.n)
-        .slice(0, topK);
-      result.push({ feature: c, total: nonMissing, counts });
-    }
-    return result;
-  }
-
-  function renderCategoricalCountsTable(tableEl, catSummary) {
-    const thead = tableEl.querySelector("thead");
-    const tbody = tableEl.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    const header = ["Feature", "Value", "N", "% (non-missing)"];
-    const trh = document.createElement("tr");
-    header.forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      trh.appendChild(th);
     });
-    thead.appendChild(trh);
-
-    for (const f of catSummary) {
-      if (!f.counts.length) {
-        const tr = document.createElement("tr");
-        [f.feature, "—", "0", "—"].forEach((x) => {
-          const td = document.createElement("td");
-          td.textContent = x;
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-        continue;
-      }
-      for (let i = 0; i < f.counts.length; i++) {
-        const row = f.counts[i];
-        const tr = document.createElement("tr");
-        const cells = [i === 0 ? f.feature : "", row.value, String(row.n), `${row.pct.toFixed(2)}%`];
-        cells.forEach((c) => {
-          const td = document.createElement("td");
-          td.textContent = c;
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-      }
-    }
   }
 
-  function splitTrain(rows) {
-    return rows.filter((r) => r.source === "train");
-  }
-
-  function groupBySurvived(trainRows) {
-    const g0 = [];
-    const g1 = [];
+  function survivalRateBy(trainRows, col) {
+    // returns [{key, rate, n}]
+    const map = new Map();
     for (const r of trainRows) {
+      const k = r[col];
       const y = r[SCHEMA.target];
-      if (y === 0) g0.push(r);
-      else if (y === 1) g1.push(r);
-    }
-    return { 0: g0, 1: g1 };
-  }
-
-  function renderGroupedNumericTable(tableEl, stats0, stats1) {
-    const thead = tableEl.querySelector("thead");
-    const tbody = tableEl.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    const header = ["Feature", "Mean(0)", "Median(0)", "Std(0)", "N(0)", "Mean(1)", "Median(1)", "Std(1)", "N(1)"];
-    const trh = document.createElement("tr");
-    header.forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-
-    const m0 = new Map(stats0.map((s) => [s.feature, s]));
-    const m1 = new Map(stats1.map((s) => [s.feature, s]));
-    const features = Array.from(new Set([...m0.keys(), ...m1.keys()]));
-
-    for (const f of features) {
-      const a = m0.get(f) || { mean: null, median: null, std: null, n: 0 };
-      const b = m1.get(f) || { mean: null, median: null, std: null, n: 0 };
-      const tr = document.createElement("tr");
-      [
-        f,
-        roundMaybe(a.mean), roundMaybe(a.median), roundMaybe(a.std), String(a.n),
-        roundMaybe(b.mean), roundMaybe(b.median), roundMaybe(b.std), String(b.n),
-      ].forEach((c) => {
-        const td = document.createElement("td");
-        td.textContent = c;
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
-    }
-  }
-
-  function renderGroupedCategoricalTable(tableEl, cat0, cat1) {
-    const thead = tableEl.querySelector("thead");
-    const tbody = tableEl.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    const header = ["Feature", "Value", "N(0)", "%(0)", "N(1)", "%(1)"];
-    const trh = document.createElement("tr");
-    header.forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-
-    const toMap = (arr) => {
-      const m = new Map();
-      for (const f of arr) {
-        const vm = new Map();
-        for (const c of f.counts) vm.set(c.value, { n: c.n, pct: c.pct });
-        m.set(f.feature, vm);
-      }
-      return m;
-    };
-
-    const m0 = toMap(cat0);
-    const m1 = toMap(cat1);
-    const features = Array.from(new Set([...m0.keys(), ...m1.keys()]));
-
-    for (const feature of features) {
-      const vm0 = m0.get(feature) || new Map();
-      const vm1 = m1.get(feature) || new Map();
-      const values = Array.from(new Set([...vm0.keys(), ...vm1.keys()])).sort();
-
-      if (!values.length) {
-        const tr = document.createElement("tr");
-        [feature, "—", "0", "—", "0", "—"].forEach((x) => {
-          const td = document.createElement("td");
-          td.textContent = x;
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-        continue;
-      }
-
-      for (let i = 0; i < values.length; i++) {
-        const v = values[i];
-        const a = vm0.get(v) || { n: 0, pct: 0 };
-        const b = vm1.get(v) || { n: 0, pct: 0 };
-        const tr = document.createElement("tr");
-        const cells = [
-          i === 0 ? feature : "",
-          v,
-          String(a.n),
-          a.n ? `${a.pct.toFixed(2)}%` : "—",
-          String(b.n),
-          b.n ? `${b.pct.toFixed(2)}%` : "—",
-        ];
-        cells.forEach((c) => {
-          const td = document.createElement("td");
-          td.textContent = c;
-          tr.appendChild(td);
-        });
-        tbody.appendChild(tr);
-      }
-    }
-  }
-
-  // -----------------------------
-  // Visualizations
-  // -----------------------------
-  function computeSurvivalRateByCategory(trainRows, feature) {
-    const map = new Map(); // value -> {n, survived}
-    for (const r of trainRows) {
-      const v = r[feature];
-      const y = r[SCHEMA.target];
-      if (isMissing(v)) continue;
-      if (y !== 0 && y !== 1) continue;
-
-      const key = String(v);
-      if (!map.has(key)) map.set(key, { n: 0, survived: 0 });
+      if (isMissing(k) || (y !== 0 && y !== 1)) continue;
+      const key = String(k);
+      if (!map.has(key)) map.set(key, { n: 0, s: 0 });
       const obj = map.get(key);
       obj.n += 1;
-      obj.survived += (y === 1 ? 1 : 0);
+      obj.s += (y === 1 ? 1 : 0);
     }
-    const out = Array.from(map.entries()).map(([value, obj]) => ({
-      value,
-      n: obj.n,
-      rate: obj.n ? (obj.survived / obj.n) * 100 : 0,
+    const out = [...map.entries()].map(([key, v]) => ({
+      key,
+      n: v.n,
+      rate: v.n ? (v.s / v.n) * 100 : 0,
     }));
-
     out.sort((a, b) => {
-      const an = Number(a.value), bn = Number(b.value);
+      const an = Number(a.key), bn = Number(b.key);
       if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-      return a.value.localeCompare(b.value);
+      return a.key.localeCompare(b.key);
     });
-
     return out;
   }
 
-  function renderRateBarChart(canvasEl, existingChartRef, data) {
-    const labels = data.map((d) => `${d.value}`);
-    const rates = data.map((d) => Number(d.rate.toFixed(2)));
-    const counts = data.map((d) => d.n);
+  function renderQuickEDA(trainRows) {
+    el.visEDA.innerHTML = ""; // clear
+    const bySex = survivalRateBy(trainRows, "Sex");
+    const byPclass = survivalRateBy(trainRows, "Pclass");
 
-    destroyChart(existingChartRef);
-
-    return new Chart(canvasEl, {
-      type: "bar",
-      data: { labels, datasets: [{ label: "Survival rate (%)", data: rates }] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: { y: { beginAtZero: true, max: 100, ticks: { callback: (v) => `${v}%` } } },
-        plugins: {
-          legend: { display: false },
-          tooltip: { callbacks: { label: (ctx) => `${ctx.raw}% survival (n=${counts[ctx.dataIndex]})` } },
-        },
-      },
-    });
+    // tfjs-vis bar charts
+    tfvis.render.barchart(
+      el.visEDA,
+      bySex.map(d => ({ x: d.key, y: d.rate })),
+      { title: "Survival rate by Sex (train)", xLabel: "Sex", yLabel: "Survival rate (%)" }
+    );
+    tfvis.render.barchart(
+      el.visEDA,
+      byPclass.map(d => ({ x: d.key, y: d.rate })),
+      { title: "Survival rate by Pclass (train)", xLabel: "Pclass", yLabel: "Survival rate (%)" }
+    );
   }
 
-  function histogram(rows, col, bins = 20) {
-    const vals = rows.map((r) => toNumberOrNull(r[col])).filter((v) => v !== null);
-    if (!vals.length) return { labels: [], counts: [] };
+  function renderKPIs(trainRows, testRows) {
+    el.kpiTrain.textContent = `${trainRows.length} / ${getColumns(trainRows).length}`;
+    el.kpiTest.textContent = `${testRows.length} / ${getColumns(testRows).length}`;
 
-    const min = Math.min(...vals);
-    const max = Math.max(...vals);
-    if (min === max) return { labels: [`${min}`], counts: [vals.length] };
+    const miss = missingPct(trainRows);
+    state.inspect.missingPct = miss;
+    const top3 = miss.slice(0, 3).map(d => `${d.col} ${d.pct.toFixed(1)}%`).join(" • ");
+    el.kpiMissing.textContent = top3 || "—";
+  }
 
-    const width = (max - min) / bins;
-    const counts = new Array(bins).fill(0);
+  // ----------------------------
+  // Preprocessing
+  // ----------------------------
+  function median(nums) {
+    if (!nums.length) return null;
+    const a = [...nums].sort((x, y) => x - y);
+    const m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  }
 
-    for (const v of vals) {
-      let idx = Math.floor((v - min) / width);
-      if (idx >= bins) idx = bins - 1;
-      if (idx < 0) idx = 0;
-      counts[idx] += 1;
+  function mode(values) {
+    const map = new Map();
+    for (const v of values) {
+      if (isMissing(v)) continue;
+      const k = String(v);
+      map.set(k, (map.get(k) || 0) + 1);
     }
-
-    const labels = counts.map((_, i) => {
-      const a = min + i * width;
-      const b = a + width;
-      return `${a.toFixed(1)}–${b.toFixed(1)}`;
-    });
-
-    return { labels, counts };
-  }
-
-  function renderHistogram(canvasEl, existingChartRef, hist, title) {
-    destroyChart(existingChartRef);
-
-    return new Chart(canvasEl, {
-      type: "bar",
-      data: { labels: hist.labels, datasets: [{ label: title, data: hist.counts }] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: { y: { beginAtZero: true } },
-        plugins: { legend: { display: false } },
-      },
-    });
-  }
-
-  // Correlation (Pearson) on numeric features (train only)
-  function pearson(x, y) {
-    const n = x.length;
-    if (n < 2) return null;
-    const mx = mean(x);
-    const my = mean(y);
-    let num = 0, dx2 = 0, dy2 = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = x[i] - mx;
-      const dy = y[i] - my;
-      num += dx * dy;
-      dx2 += dx * dx;
-      dy2 += dy * dy;
+    let best = null, bestN = -1;
+    for (const [k, n] of map.entries()) {
+      if (n > bestN) { bestN = n; best = k; }
     }
-    const den = Math.sqrt(dx2 * dy2);
-    return den ? num / den : null;
+    return best;
   }
 
-  function correlationMatrix(trainRows, numericCols) {
-    const matrix = [];
-    for (let i = 0; i < numericCols.length; i++) {
-      const row = [];
-      for (let j = 0; j < numericCols.length; j++) {
-        const a = numericCols[i];
-        const b = numericCols[j];
-        const xs = [];
-        const ys = [];
-        for (const r of trainRows) {
-          const va = toNumberOrNull(r[a]);
-          const vb = toNumberOrNull(r[b]);
-          if (va === null || vb === null) continue;
-          xs.push(va);
-          ys.push(vb);
-        }
-        row.push(pearson(xs, ys));
+  function meanStd(nums) {
+    if (!nums.length) return { mean: 0, std: 1 };
+    const mean = nums.reduce((s, x) => s + x, 0) / nums.length;
+    const v = nums.reduce((s, x) => s + (x - mean) ** 2, 0) / Math.max(1, nums.length - 1);
+    const std = Math.sqrt(v) || 1;
+    return { mean, std };
+  }
+
+  function addEngineeredFeatures(row, useFamily, useAlone) {
+    const out = { ...row };
+    if (useFamily || useAlone) {
+      const sib = Number(out.SibSp);
+      const par = Number(out.Parch);
+      const familySize = (Number.isFinite(sib) ? sib : 0) + (Number.isFinite(par) ? par : 0) + 1;
+      if (useFamily) out.FamilySize = familySize;
+      if (useAlone) out.IsAlone = familySize === 1 ? 1 : 0;
+    }
+    return out;
+  }
+
+  function fitPreprocessParams(trainRows) {
+    // Impute Age median
+    const ages = trainRows.map(r => r.Age).filter(v => typeof v === "number" && Number.isFinite(v));
+    const ageMedian = median(ages);
+
+    // Embarked mode (categorical)
+    const embarkedMode = mode(trainRows.map(r => r.Embarked));
+
+    // For standardization: compute on train AFTER imputation
+    const imputedAges = trainRows.map(r => (typeof r.Age === "number" ? r.Age : ageMedian)).filter(v => typeof v === "number");
+    const fares = trainRows.map(r => r.Fare).filter(v => typeof v === "number" && Number.isFinite(v));
+
+    const ageMS = meanStd(imputedAges);
+    const fareMS = meanStd(fares);
+
+    // One-hot categories fit on train
+    const sexCats = [...new Set(trainRows.map(r => String(r.Sex)).filter(v => v && v !== "undefined"))].sort();
+    const pclassCats = [...new Set(trainRows.map(r => String(r.Pclass)).filter(v => v && v !== "undefined"))]
+      .sort((a,b) => Number(a) - Number(b));
+    const embarkedCats = [...new Set(trainRows.map(r => String(r.Embarked || embarkedMode)).filter(v => v && v !== "undefined"))].sort();
+
+    return {
+      ageMedian,
+      embarkedMode,
+      ageMean: ageMS.mean,
+      ageStd: ageMS.std,
+      fareMean: fareMS.mean,
+      fareStd: fareMS.std,
+      cats: { Sex: sexCats, Pclass: pclassCats, Embarked: embarkedCats },
+    };
+  }
+
+  function zscore(x, mean, std) {
+    const v = (x - mean) / (std || 1);
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  function oneHot(value, categories) {
+    const v = String(value);
+    return categories.map((c) => (v === String(c) ? 1 : 0));
+  }
+
+  function preprocessRows(rows, params, { useFamily, useAlone, includeTarget }) {
+    // Build feature vector for each row, matching a fixed feature order.
+    // One-hot order is stable based on params.cats.
+    const featureNames = [];
+
+    // numeric
+    featureNames.push("Age_z");
+    featureNames.push("Fare_z");
+    featureNames.push("SibSp");
+    featureNames.push("Parch");
+
+    // optional engineered
+    if (useFamily) featureNames.push("FamilySize");
+    if (useAlone) featureNames.push("IsAlone");
+
+    // one-hot Sex
+    params.cats.Sex.forEach((c) => featureNames.push(`Sex_${c}`));
+    // one-hot Pclass
+    params.cats.Pclass.forEach((c) => featureNames.push(`Pclass_${c}`));
+    // one-hot Embarked
+    params.cats.Embarked.forEach((c) => featureNames.push(`Embarked_${c}`));
+
+    const X = [];
+    const y = [];
+    const ids = [];
+
+    for (const r0 of rows) {
+      const r = addEngineeredFeatures(r0, useFamily, useAlone);
+
+      // Identifier for exports
+      const pid = r[SCHEMA.identifier];
+      ids.push(pid);
+
+      // Impute
+      const age = (typeof r.Age === "number" && Number.isFinite(r.Age)) ? r.Age : params.ageMedian;
+      const embarked = (!isMissing(r.Embarked)) ? r.Embarked : params.embarkedMode;
+
+      // Standardize Age/Fare
+      const ageZ = zscore(Number(age), params.ageMean, params.ageStd);
+      const fareZ = zscore(Number(r.Fare), params.fareMean, params.fareStd);
+
+      const sib = Number(r.SibSp);
+      const par = Number(r.Parch);
+
+      const vec = [];
+      vec.push(ageZ);
+      vec.push(fareZ);
+      vec.push(Number.isFinite(sib) ? sib : 0);
+      vec.push(Number.isFinite(par) ? par : 0);
+
+      if (useFamily) vec.push(Number(r.FamilySize) || 1);
+      if (useAlone) vec.push(Number(r.IsAlone) || 0);
+
+      // one-hot categoricals
+      vec.push(...oneHot(r.Sex, params.cats.Sex));
+      vec.push(...oneHot(r.Pclass, params.cats.Pclass));
+      vec.push(...oneHot(embarked, params.cats.Embarked));
+
+      X.push(vec);
+
+      if (includeTarget) {
+        const t = r[SCHEMA.target];
+        y.push(t === 1 ? 1 : 0);
       }
-      matrix.push(row);
     }
-    return matrix;
+
+    return { X, y, ids, featureNames };
   }
 
-  function corrColor(c) {
-    if (c === null || c === undefined || !Number.isFinite(c)) return "rgba(255,255,255,0.10)";
-    const v = Math.max(-1, Math.min(1, c));
-    const hue = v >= 0 ? 220 : 0; // blue positive, red negative
-    const alpha = 0.15 + 0.65 * Math.abs(v);
-    return `hsla(${hue}, 90%, 60%, ${alpha})`;
+  function toTensor2D(X) {
+    return tf.tensor2d(X, [X.length, X[0].length], "float32");
+  }
+  function toTensor1D(y) {
+    return tf.tensor1d(y, "float32");
   }
 
-  function renderCorrelationBubbleMatrix(trainRows) {
-    const colsPresent = new Set(getColumns(trainRows));
-    const numericCols = [SCHEMA.target, "Pclass", "Age", "SibSp", "Parch", "Fare"].filter((c) => colsPresent.has(c));
-    if (numericCols.length < 2) {
-      state.charts.corr = destroyChart(state.charts.corr);
+  function stratifiedSplit(X, y, valFrac = 0.2, seed = 42) {
+    // Simple stratified split by label
+    const idx0 = [];
+    const idx1 = [];
+    for (let i = 0; i < y.length; i++) (y[i] === 1 ? idx1 : idx0).push(i);
+
+    // deterministic shuffle
+    function mulberry32(a) {
+      return function() {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    const rand = mulberry32(seed);
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+    }
+    shuffle(idx0); shuffle(idx1);
+
+    const nVal0 = Math.floor(idx0.length * valFrac);
+    const nVal1 = Math.floor(idx1.length * valFrac);
+
+    const valIdx = idx0.slice(0, nVal0).concat(idx1.slice(0, nVal1));
+    const trainIdx = idx0.slice(nVal0).concat(idx1.slice(nVal1));
+
+    // shuffle combined (not necessary but nice)
+    shuffle(valIdx); shuffle(trainIdx);
+
+    const Xtrain = trainIdx.map(i => X[i]);
+    const ytrain = trainIdx.map(i => y[i]);
+    const Xval = valIdx.map(i => X[i]);
+    const yval = valIdx.map(i => y[i]);
+
+    return { Xtrain, ytrain, Xval, yval };
+  }
+
+  async function runPreprocessing() {
+    if (!state.raw.trainRows || !state.raw.testRows) {
+      alertUser("Load data first.");
       return;
     }
 
-    const M = correlationMatrix(trainRows, numericCols);
-    const points = [];
-    for (let i = 0; i < numericCols.length; i++) {
-      for (let j = 0; j < numericCols.length; j++) {
-        const c = M[i][j];
-        points.push({
-          x: j,
-          y: i,
-          r: c === null ? 0 : 3 + 14 * Math.abs(c),
-          _corr: c,
-          backgroundColor: corrColor(c),
-          borderColor: "rgba(255,255,255,0.10)",
-          borderWidth: 1,
-        });
+    setPill(el.prepPill, "Preprocess", "running…");
+
+    const useFamily = el.toggleFamily.checked;
+    const useAlone = el.toggleAlone.checked;
+
+    const params = fitPreprocessParams(state.raw.trainRows);
+
+    // Build matrices
+    const train = preprocessRows(state.raw.trainRows, params, { useFamily, useAlone, includeTarget: true });
+    const test = preprocessRows(state.raw.testRows, params, { useFamily, useAlone, includeTarget: false });
+
+    // Stratified split
+    const split = stratifiedSplit(train.X, train.y, 0.2, 42);
+
+    // Dispose old tensors if any
+    disposeTensors();
+
+    state.prep = {
+      ...state.prep,
+      ...params,
+      featureNames: train.featureNames,
+      summary: {
+        schema: SCHEMA,
+        engineered: { FamilySize: useFamily, IsAlone: useAlone },
+        imputation: { Age_median: params.ageMedian, Embarked_mode: params.embarkedMode },
+        standardization: {
+          Age: { mean: params.ageMean, std: params.ageStd },
+          Fare: { mean: params.fareMean, std: params.fareStd },
+        },
+        onehot: params.cats,
+        featureNames: train.featureNames,
       }
-    }
+    };
 
-    state.charts.corr = destroyChart(state.charts.corr);
+    // Tensors
+    state.tensors.xTrain = toTensor2D(split.Xtrain);
+    state.tensors.yTrain = toTensor1D(split.ytrain);
+    state.tensors.xVal = toTensor2D(split.Xval);
+    state.tensors.yVal = toTensor1D(split.yval);
 
-    state.charts.corr = new Chart(el.corrHeatmap, {
-      type: "bubble",
-      data: {
-        datasets: [{
-          data: points,
-          parsing: false,
-          backgroundColor: (ctx) => ctx.raw.backgroundColor,
-          borderColor: (ctx) => ctx.raw.borderColor,
-          borderWidth: (ctx) => ctx.raw.borderWidth,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: {
-          x: {
-            min: -0.5,
-            max: numericCols.length - 0.5,
-            ticks: { callback: (v) => numericCols[v] ?? "", autoSkip: false, maxRotation: 0 },
-            grid: { color: "rgba(255,255,255,0.06)" },
-          },
-          y: {
-            min: -0.5,
-            max: numericCols.length - 0.5,
-            ticks: { callback: (v) => numericCols[v] ?? "", autoSkip: false },
-            grid: { color: "rgba(255,255,255,0.06)" },
-          },
-        },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: {
-              title: (items) => {
-                const p = items[0].raw;
-                return `${numericCols[p.y]} vs ${numericCols[p.x]}`;
-              },
-              label: (item) => {
-                const c = item.raw._corr;
-                return `corr = ${c === null ? "—" : c.toFixed(4)}`;
-              },
-            },
-          },
-        },
-      },
-    });
+    state.tensors.xTest = toTensor2D(test.X);
+    state.tensors.testPassengerIds = test.ids;
+
+    // Log
+    const logLines = [];
+    logLines.push(`Features (after preprocessing): ${train.featureNames.length}`);
+    logLines.push(train.featureNames.join(", "));
+    logLines.push("");
+    logLines.push(`Train X shape: [${split.Xtrain.length}, ${train.featureNames.length}]`);
+    logLines.push(`Train y shape: [${split.ytrain.length}]`);
+    logLines.push(`Val   X shape: [${split.Xval.length}, ${train.featureNames.length}]`);
+    logLines.push(`Val   y shape: [${split.yval.length}]`);
+    logLines.push(`Test  X shape: [${test.X.length}, ${train.featureNames.length}]`);
+    el.prepLog.textContent = logLines.join("\n");
+
+    setPill(el.prepPill, "Preprocess", "done ✅");
   }
 
-  // -----------------------------
-  // Export
-  // -----------------------------
+  function disposeTensors() {
+    for (const k of Object.keys(state.tensors)) {
+      const t = state.tensors[k];
+      if (t && typeof t.dispose === "function") t.dispose();
+      state.tensors[k] = null;
+    }
+    state.tensors.testPassengerIds = null;
+  }
+
+  // ----------------------------
+  // Model
+  // ----------------------------
+  function buildModel(inputDim) {
+    // Shallow binary classifier: Dense(16,relu) -> Dense(1,sigmoid)
+    const model = tf.sequential();
+    model.add(tf.layers.dense({ units: 16, activation: "relu", inputShape: [inputDim] }));
+    model.add(tf.layers.dense({ units: 1, activation: "sigmoid" }));
+
+    model.compile({
+      optimizer: tf.train.adam(),
+      loss: "binaryCrossentropy",
+      metrics: ["accuracy"],
+    });
+
+    return model;
+  }
+
+  function captureModelSummary(model) {
+    const lines = [];
+    model.summary(120, undefined, (line) => lines.push(line));
+    return lines.join("\n");
+  }
+
+  function onBuildModel() {
+    if (!state.tensors.xTrain) {
+      alertUser("Run preprocessing first.");
+      return;
+    }
+    const inputDim = state.tensors.xTrain.shape[1];
+    state.model = buildModel(inputDim);
+    el.modelSummary.textContent = captureModelSummary(state.model);
+    setPill(el.modelPill, "Model", `built ✅ (inputDim=${inputDim})`);
+  }
+
+  async function onSaveModel() {
+    if (!state.model) {
+      alertUser("Build/train a model first.");
+      return;
+    }
+    try {
+      await state.model.save("downloads://titanic-tfjs");
+      setPill(el.modelPill, "Model", "saved ✅");
+    } catch (e) {
+      console.error(e);
+      alertUser("Model save failed. Check console.");
+    }
+  }
+
+  // ----------------------------
+  // Training (with early stopping)
+  // ----------------------------
+  function earlyStopping(patience = 5) {
+    let best = Infinity;
+    let wait = 0;
+    let bestWeights = null;
+
+    return {
+      onEpochEnd: async (epoch, logs) => {
+        const valLoss = logs?.val_loss;
+        if (typeof valLoss !== "number") return;
+
+        if (valLoss < best - 1e-6) {
+          best = valLoss;
+          wait = 0;
+          // clone weights
+          bestWeights = state.model.getWeights().map(w => w.clone());
+        } else {
+          wait++;
+          if (wait >= patience) {
+            // restore best weights and stop
+            if (bestWeights) state.model.setWeights(bestWeights);
+            state.model.stopTraining = true;
+          }
+        }
+      },
+      onTrainEnd: async () => {
+        // dispose best weights clones
+        if (bestWeights) bestWeights.forEach(w => w.dispose());
+      }
+    };
+  }
+
+  async function onTrain() {
+    if (!state.model) {
+      alertUser("Build model first.");
+      return;
+    }
+    if (!state.tensors.xTrain || !state.tensors.yTrain) {
+      alertUser("Run preprocessing first.");
+      return;
+    }
+
+    setPill(el.trainPill, "Train", "training…");
+
+    // Clear vis containers
+    el.visFit.innerHTML = "";
+    el.visHistory.innerHTML = "";
+
+    const fitSurface = { name: "Training", tab: "Fit" };
+    const metricsSurface = { name: "History", tab: "Fit" };
+
+    // tfjs-vis fit callbacks
+    const fitCallbacks = tfvis.show.fitCallbacks(
+      el.visFit,
+      ["loss", "acc", "val_loss", "val_acc"],
+      { callbacks: ["onEpochEnd"] }
+    );
+
+    const es = earlyStopping(5);
+
+    await state.model.fit(state.tensors.xTrain, state.tensors.yTrain, {
+      epochs: 50,
+      batchSize: 32,
+      validationData: [state.tensors.xVal, state.tensors.yVal],
+      callbacks: {
+        onEpochEnd: async (epoch, logs) => {
+          await fitCallbacks.onEpochEnd(epoch, logs);
+          await es.onEpochEnd(epoch, logs);
+          setPill(el.trainPill, "Train", `epoch ${epoch + 1}/50 loss=${logs.loss.toFixed(4)} val_loss=${logs.val_loss.toFixed(4)}`);
+        },
+        onTrainEnd: async (logs) => {
+          await es.onTrainEnd(logs);
+        }
+      }
+    });
+
+    setPill(el.trainPill, "Train", "done ✅");
+  }
+
+  // ----------------------------
+  // Metrics: ROC/AUC + threshold slider -> confusion matrix + PRF1
+  // ----------------------------
+  async function computeValProbsAndLabels() {
+    const probsT = state.model.predict(state.tensors.xVal);
+    const probs = await probsT.data();
+    probsT.dispose();
+
+    const labels = await state.tensors.yVal.data(); // float32 0/1
+    const y = new Int32Array(labels.length);
+    for (let i = 0; i < labels.length; i++) y[i] = labels[i] >= 0.5 ? 1 : 0;
+
+    return { probs: Float32Array.from(probs), labels: y };
+  }
+
+  function rocCurve(labels, probs, steps = 101) {
+    const tpr = [];
+    const fpr = [];
+    for (let i = 0; i < steps; i++) {
+      const thr = i / (steps - 1);
+      let tp = 0, fp = 0, tn = 0, fn = 0;
+      for (let j = 0; j < labels.length; j++) {
+        const pred = probs[j] >= thr ? 1 : 0;
+        const y = labels[j];
+        if (y === 1 && pred === 1) tp++;
+        if (y === 0 && pred === 1) fp++;
+        if (y === 0 && pred === 0) tn++;
+        if (y === 1 && pred === 0) fn++;
+      }
+      const tprVal = tp + fn ? tp / (tp + fn) : 0;
+      const fprVal = fp + tn ? fp / (fp + tn) : 0;
+      tpr.push(tprVal);
+      fpr.push(fprVal);
+    }
+    return { fpr, tpr };
+  }
+
+  function aucFromRoc(fpr, tpr) {
+    // Trapezoidal rule, assuming fpr increasing with threshold direction (it will be)
+    let auc = 0;
+    for (let i = 1; i < fpr.length; i++) {
+      const dx = fpr[i] - fpr[i - 1];
+      const yAvg = (tpr[i] + tpr[i - 1]) / 2;
+      auc += dx * yAvg;
+    }
+    return Math.abs(auc);
+  }
+
+  function confusionAndPRF1(labels, probs, threshold) {
+    let tp = 0, fp = 0, tn = 0, fn = 0;
+    for (let i = 0; i < labels.length; i++) {
+      const pred = probs[i] >= threshold ? 1 : 0;
+      const y = labels[i];
+      if (y === 1 && pred === 1) tp++;
+      if (y === 0 && pred === 1) fp++;
+      if (y === 0 && pred === 0) tn++;
+      if (y === 1 && pred === 0) fn++;
+    }
+    const acc = (tp + tn) / Math.max(1, tp + tn + fp + fn);
+    const precision = tp / Math.max(1, tp + fp);
+    const recall = tp / Math.max(1, tp + fn);
+    const f1 = (2 * precision * recall) / Math.max(1e-12, precision + recall);
+    return { tp, fp, tn, fn, acc, precision, recall, f1 };
+  }
+
+  function renderMetricsTable(m) {
+    const thead = el.metricsTable.querySelector("thead");
+    const tbody = el.metricsTable.querySelector("tbody");
+    thead.innerHTML = "";
+    tbody.innerHTML = "";
+
+    // Confusion matrix section
+    const trh = document.createElement("tr");
+    ["", "Pred 1", "Pred 0"].forEach((h) => {
+      const th = document.createElement("th");
+      th.textContent = h;
+      trh.appendChild(th);
+    });
+    thead.appendChild(trh);
+
+    const row1 = document.createElement("tr");
+    row1.appendChild(td("Actual 1"));
+    row1.appendChild(td(String(m.tp)));
+    row1.appendChild(td(String(m.fn)));
+    tbody.appendChild(row1);
+
+    const row0 = document.createElement("tr");
+    row0.appendChild(td("Actual 0"));
+    row0.appendChild(td(String(m.fp)));
+    row0.appendChild(td(String(m.tn)));
+    tbody.appendChild(row0);
+
+    // Spacer
+    const spacer = document.createElement("tr");
+    spacer.appendChild(td("—"));
+    spacer.appendChild(td("—"));
+    spacer.appendChild(td("—"));
+    tbody.appendChild(spacer);
+
+    // Metrics
+    const metrics = [
+      ["Accuracy", m.acc],
+      ["Precision", m.precision],
+      ["Recall", m.recall],
+      ["F1", m.f1],
+    ];
+    for (const [name, val] of metrics) {
+      const tr = document.createElement("tr");
+      tr.appendChild(td(name));
+      tr.appendChild(td(val.toFixed(4)));
+      tr.appendChild(td(""));
+      tbody.appendChild(tr);
+    }
+
+    function td(text) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      return cell;
+    }
+  }
+
+  function renderROC(fpr, tpr) {
+    el.visROC.innerHTML = "";
+    const points = fpr.map((x, i) => ({ x, y: tpr[i] }));
+    tfvis.render.linechart(
+      el.visROC,
+      { values: [points], series: ["ROC"] },
+      { title: "ROC Curve (validation)", xLabel: "FPR", yLabel: "TPR", width: 520, height: 360 }
+    );
+  }
+
+  async function onEvaluate() {
+    if (!state.model || !state.tensors.xVal) {
+      alertUser("Train a model first.");
+      return;
+    }
+
+    setPill(el.trainPill, "Train", "evaluating…");
+
+    const { probs, labels } = await computeValProbsAndLabels();
+    state.eval.valProbs = probs;
+    state.eval.valLabels = labels;
+
+    const roc = rocCurve(labels, probs, 101);
+    const auc = aucFromRoc(roc.fpr, roc.tpr);
+
+    state.eval.roc = roc;
+    state.eval.auc = auc;
+
+    setPill(el.aucPill, "AUC", auc.toFixed(4));
+    renderROC(roc.fpr, roc.tpr);
+
+    // Render metrics at current threshold
+    const thr = Number(el.thresholdSlider.value);
+    state.pred.threshold = thr;
+    const m = confusionAndPRF1(labels, probs, thr);
+    renderMetricsTable(m);
+
+    setPill(el.trainPill, "Train", "evaluation ready ✅");
+  }
+
+  function onThresholdChange() {
+    const thr = Number(el.thresholdSlider.value);
+    state.pred.threshold = thr;
+    el.thresholdLabel.textContent = thr.toFixed(2);
+
+    if (!state.eval.valProbs || !state.eval.valLabels) return;
+    const m = confusionAndPRF1(state.eval.valLabels, state.eval.valProbs, thr);
+    renderMetricsTable(m);
+  }
+
+  // ----------------------------
+  // Prediction + Export
+  // ----------------------------
+  async function onPredictTest() {
+    if (!state.model || !state.tensors.xTest) {
+      alertUser("Need preprocessing + trained model before prediction.");
+      return;
+    }
+    setPill(el.predPill, "Predict", "predicting…");
+    try {
+      const probsT = state.model.predict(state.tensors.xTest);
+      const probs = await probsT.data();
+      probsT.dispose();
+      state.pred.testProbs = Float32Array.from(probs);
+      setPill(el.predPill, "Predict", `done ✅ (n=${state.pred.testProbs.length})`);
+    } catch (e) {
+      console.error(e);
+      alertUser("Prediction failed. Check console.");
+      setPill(el.predPill, "Predict", "failed");
+    }
+  }
+
+  function toCSV(rows, header) {
+    const lines = [];
+    lines.push(header.join(","));
+    for (const r of rows) {
+      lines.push(header.map((h) => r[h]).join(","));
+    }
+    return lines.join("\n");
+  }
+
   function downloadBlob(filename, blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -743,235 +990,103 @@
     URL.revokeObjectURL(url);
   }
 
-  function exportMergedCSV() {
-    if (!state.merged || !state.merged.length) {
-      alertUser("No merged dataset available. Load & Merge first.");
+  function onExportSubmission() {
+    if (!state.pred.testProbs || !state.tensors.testPassengerIds) {
+      alertUser("Run Predict Test first.");
       return;
     }
-    try {
-      const csv = Papa.unparse(state.merged, { quotes: true });
-      downloadBlob("titanic_merged.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
-      setExportStatus("merged CSV downloaded");
-    } catch (e) {
-      console.error(e);
-      alertUser("Export failed (CSV). Check console for details.");
-      setExportStatus("CSV export failed");
+    const thr = state.pred.threshold;
+    const rows = [];
+    for (let i = 0; i < state.pred.testProbs.length; i++) {
+      rows.push({
+        PassengerId: state.tensors.testPassengerIds[i],
+        Survived: state.pred.testProbs[i] >= thr ? 1 : 0,
+      });
     }
+    const csv = toCSV(rows, ["PassengerId", "Survived"]);
+    downloadBlob("submission.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    setPill(el.exportPill, "Export", "submission.csv downloaded ✅");
   }
 
-  function buildSummary(rows) {
-    // Lightweight summary for JSON export
-    const cols = getColumns(rows);
-    const split = computeSplit(rows);
-    const missing = missingness(rows);
-
-    const numericFeatures = ["Pclass", "Age", "SibSp", "Parch", "Fare"].filter((c) => cols.includes(c));
-    const categoricalFeatures = ["Sex", "Embarked"].filter((c) => cols.includes(c));
-
-    const overallNumeric = numericStats(rows, numericFeatures);
-    const overallCat = categoricalCounts(rows, categoricalFeatures);
-
-    const trainRows = splitTrain(rows);
-    const grouped = groupBySurvived(trainRows);
-
-    const trainNumeric0 = numericStats(grouped[0], numericFeatures);
-    const trainNumeric1 = numericStats(grouped[1], numericFeatures);
-
-    const trainCat0 = categoricalCounts(grouped[0], categoricalFeatures);
-    const trainCat1 = categoricalCounts(grouped[1], categoricalFeatures);
-
-    return {
-      schema: SCHEMA,
-      shape: { rows: rows.length, cols: cols.length },
-      split,
-      columns: cols,
-      missing,
-      stats: {
-        overall: { numeric: overallNumeric, categorical: overallCat },
-        trainBySurvived: {
-          "0": { numeric: trainNumeric0, categorical: trainCat0 },
-          "1": { numeric: trainNumeric1, categorical: trainCat1 },
-        },
-      },
-    };
-  }
-
-  function exportSummaryJSON() {
-    if (!state.summary) {
-      alertUser("No EDA summary available. Run EDA first.");
+  function onExportProbs() {
+    if (!state.pred.testProbs || !state.tensors.testPassengerIds) {
+      alertUser("Run Predict Test first.");
       return;
     }
-    try {
-      const json = JSON.stringify(state.summary, null, 2);
-      downloadBlob("titanic_eda_summary.json", new Blob([json], { type: "application/json;charset=utf-8" }));
-      setExportStatus("JSON summary downloaded");
-    } catch (e) {
-      console.error(e);
-      alertUser("Export failed (JSON). Check console for details.");
-      setExportStatus("JSON export failed");
+    const rows = [];
+    for (let i = 0; i < state.pred.testProbs.length; i++) {
+      rows.push({
+        PassengerId: state.tensors.testPassengerIds[i],
+        Probability: Number(state.pred.testProbs[i]).toFixed(6),
+      });
     }
+    const csv = toCSV(rows, ["PassengerId", "Probability"]);
+    downloadBlob("probabilities.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    setPill(el.exportPill, "Export", "probabilities.csv downloaded ✅");
   }
 
-  // -----------------------------
-  // Pipeline: Load & Merge, then Run EDA
-  // -----------------------------
-  async function loadAndMerge() {
-    const trainFile = el.trainFile.files?.[0];
-    const testFile = el.testFile.files?.[0];
-
-    if (!trainFile || !testFile) {
-      alertUser("Please upload both train.csv and test.csv.");
+  function onExportDebug() {
+    if (!state.prep.summary) {
+      alertUser("Run preprocessing first.");
       return;
     }
-
-    setStatus("parsing CSV files…");
-    setExportStatus("idle");
-
-    try {
-      const [trainRows, testRows] = await Promise.all([
-        parseCsvFile(trainFile),
-        parseCsvFile(testFile),
-      ]);
-
-      if (!trainRows?.length || !testRows?.length) throw new Error("One of the CSV files looks empty.");
-
-      state.train = trainRows;
-      state.test = testRows;
-      state.merged = mergeDatasets(trainRows, testRows);
-
-      renderKPIs(state.merged);
-      renderPreviewTable(state.merged);
-
-      setStatus("loaded & merged ✅");
-    } catch (err) {
-      console.error(err);
-      alertUser(`Load failed: ${err.message || err}`);
-      setStatus("load failed");
-    }
+    const json = JSON.stringify(state.prep.summary, null, 2);
+    downloadBlob("preprocessing_summary.json", new Blob([json], { type: "application/json;charset=utf-8" }));
+    setPill(el.exportPill, "Export", "preprocessing_summary.json downloaded ✅");
   }
 
-  function runEDA() {
-    if (!state.merged || !state.merged.length) {
-      alertUser("No merged dataset available. Load & Merge first.");
-      return;
-    }
+  // ----------------------------
+  // Button wiring
+  // ----------------------------
+  async function onLoadInspect() {
+    const loaded = await loadFromFileInputs();
+    if (!loaded) return;
 
-    try {
-      setStatus("running EDA…");
+    const { trainRows, testRows } = loaded;
 
-      // Missing values chart
-      renderMissingChart(state.merged);
+    // KPIs + preview + missing
+    renderKPIs(trainRows, testRows);
+    renderPreviewTable(trainRows, 10);
 
-      // Stats tables
-      const cols = getColumns(state.merged);
-      const numericFeatures = ["Pclass", "Age", "SibSp", "Parch", "Fare"].filter((c) => cols.includes(c));
-      const categoricalFeatures = ["Sex", "Embarked"].filter((c) => cols.includes(c));
+    // Quick EDA charts
+    el.visEDA.innerHTML = "";
+    renderQuickEDA(trainRows);
 
-      renderNumericStatsTable(el.numericStatsTable, numericStats(state.merged, numericFeatures));
-      renderCategoricalCountsTable(el.catCountsTable, categoricalCounts(state.merged, categoricalFeatures));
-
-      const trainRows = splitTrain(state.merged);
-      const grouped = groupBySurvived(trainRows);
-
-      renderGroupedNumericTable(
-        el.numericStatsBySurvivedTable,
-        numericStats(grouped[0], numericFeatures),
-        numericStats(grouped[1], numericFeatures),
-      );
-
-      renderGroupedCategoricalTable(
-        el.catCountsBySurvivedTable,
-        categoricalCounts(grouped[0], categoricalFeatures),
-        categoricalCounts(grouped[1], categoricalFeatures),
-      );
-
-      // Visuals
-      state.charts.sex = renderRateBarChart(el.sexBar, state.charts.sex, computeSurvivalRateByCategory(trainRows, "Sex"));
-      state.charts.pclass = renderRateBarChart(el.pclassBar, state.charts.pclass, computeSurvivalRateByCategory(trainRows, "Pclass"));
-      state.charts.embarked = renderRateBarChart(el.embarkedBar, state.charts.embarked, computeSurvivalRateByCategory(trainRows, "Embarked"));
-
-      state.charts.ageHist = renderHistogram(el.ageHist, state.charts.ageHist, histogram(state.merged, "Age", 20), "Age");
-      state.charts.fareHist = renderHistogram(el.fareHist, state.charts.fareHist, histogram(state.merged, "Fare", 24), "Fare");
-
-      renderCorrelationBubbleMatrix(trainRows);
-
-      // Summary for JSON export
-      state.summary = buildSummary(state.merged);
-
-      setStatus("EDA complete ✅");
-      setExportStatus("ready");
-    } catch (err) {
-      console.error(err);
-      alertUser(`EDA failed: ${err.message || err}`);
-      setStatus("EDA failed");
-    }
+    setPill(el.statusPill, "Status", "inspect ready ✅");
   }
 
-  // -----------------------------
-  // Reset
-  // -----------------------------
-  function resetAll() {
-    state.train = null;
-    state.test = null;
-    state.merged = null;
-    state.summary = null;
-
-    state.charts.missing = destroyChart(state.charts.missing);
-    state.charts.sex = destroyChart(state.charts.sex);
-    state.charts.pclass = destroyChart(state.charts.pclass);
-    state.charts.embarked = destroyChart(state.charts.embarked);
-    state.charts.ageHist = destroyChart(state.charts.ageHist);
-    state.charts.fareHist = destroyChart(state.charts.fareHist);
-    state.charts.corr = destroyChart(state.charts.corr);
-
-    el.trainFile.value = "";
-    el.testFile.value = "";
-
-    el.kpiRows.textContent = "—";
-    el.kpiCols.textContent = "—";
-    el.kpiSplit.textContent = "—";
-
-    el.missingNote.textContent = "—";
-
-    for (const t of [
-      el.previewTable,
-      el.numericStatsTable,
-      el.numericStatsBySurvivedTable,
-      el.catCountsTable,
-      el.catCountsBySurvivedTable,
-    ]) {
-      t.querySelector("thead").innerHTML = "";
-      t.querySelector("tbody").innerHTML = "";
-    }
-
-    setStatus("waiting for files");
-    setExportStatus("idle");
-  }
-
-  // -----------------------------
-  // Events
-  // -----------------------------
   function init() {
-    el.btnLoad.addEventListener("click", loadAndMerge);
-    el.btnRun.addEventListener("click", runEDA);
-    el.btnReset.addEventListener("click", resetAll);
+    // Default UI states
+    setPill(el.statusPill, "Status", "waiting for files");
+    setPill(el.prepPill, "Preprocess", "idle");
+    setPill(el.modelPill, "Model", "not built");
+    setPill(el.trainPill, "Train", "idle");
+    setPill(el.aucPill, "AUC", "—");
+    setPill(el.predPill, "Predict", "idle");
+    setPill(el.exportPill, "Export", "idle");
+    el.thresholdLabel.textContent = Number(el.thresholdSlider.value).toFixed(2);
 
-    el.previewRows.addEventListener("change", () => {
-      if (state.merged?.length) renderPreviewTable(state.merged);
-    });
+    el.btnLoad.addEventListener("click", onLoadInspect);
+    el.btnPreprocess.addEventListener("click", runPreprocessing);
+    el.btnBuildModel.addEventListener("click", onBuildModel);
+    el.btnSaveModel.addEventListener("click", onSaveModel);
+    el.btnTrain.addEventListener("click", onTrain);
+    el.btnEvaluate.addEventListener("click", onEvaluate);
 
-    el.btnExportCSV.addEventListener("click", exportMergedCSV);
-    el.btnExportJSON.addEventListener("click", exportSummaryJSON);
+    el.thresholdSlider.addEventListener("input", onThresholdChange);
 
-    // Simple guidance status when files are selected
-    const maybeStatus = () => {
+    el.btnPredict.addEventListener("click", onPredictTest);
+    el.btnExportSubmission.addEventListener("click", onExportSubmission);
+    el.btnExportProbs.addEventListener("click", onExportProbs);
+    el.btnExportDebug.addEventListener("click", onExportDebug);
+
+    // Helpful status updates when files selected
+    const maybe = () => {
       const ok = !!el.trainFile.files?.[0] && !!el.testFile.files?.[0];
-      setStatus(ok ? "files selected — click Load & Merge" : "waiting for files");
+      setPill(el.statusPill, "Status", ok ? "files selected — click Load & Inspect" : "waiting for files");
     };
-    el.trainFile.addEventListener("change", maybeStatus);
-    el.testFile.addEventListener("change", maybeStatus);
-
-    resetAll();
+    el.trainFile.addEventListener("change", maybe);
+    el.testFile.addEventListener("change", maybe);
   }
 
   init();
