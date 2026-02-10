@@ -5,30 +5,12 @@
 // - PapaParse: robust CSV parsing (quotes, commas inside quotes, dynamic typing)
 // - Chart.js: charts
 //
-// CHANGE (Homework1 autoload):
-// - Auto-fetch train/test CSV from your repo (GitHub Pages) on page load.
-// - Keeps file inputs as a fallback (optional).
+// Reusable note:
+// To reuse this for other split datasets (train/test), change SCHEMA below and
+// (optionally) the merge key / identifier handling.
 
 (() => {
   "use strict";
-
-  // -----------------------------
-  // Homework1: Repo autoload settings
-  // -----------------------------
-  // Put your CSVs in your repo and make sure GitHub Pages serves them.
-  // Common setup: repo-root/data/train.csv and repo-root/data/test.csv
-  // Then the URLs below (relative) work on GitHub Pages.
-  const AUTOLOAD_FROM_REPO = true;
-  const REPO_DATA = {
-    trainUrl: "Homework1/train.csv",
-    testUrl: "Homework1/test.csv",
-  };
-
-  // If you prefer absolute URLs, you can use:
-  // const REPO_DATA = {
-  //   trainUrl: "https://<user>.github.io/<repo>/data/train.csv",
-  //   testUrl: "https://<user>.github.io/<repo>/data/test.csv",
-  // };
 
   // -----------------------------
   // Schema (swap here for other datasets)
@@ -37,6 +19,7 @@
     identifier: "PassengerId", // exclude from stats/corr
     target: "Survived",        // 0/1 in train only
     features: ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"],
+    // Additional columns are allowed; we keep them, but focus EDA on these.
   };
 
   // -----------------------------
@@ -142,7 +125,9 @@
     });
   }
 
-  // NEW: parse CSV by URL (GitHub Pages / repo-hosted files)
+  // -----------------------------
+  // NEW: CSV parsing from URL (repo auto-load)
+  // -----------------------------
   function parseCsvUrl(url) {
     return new Promise((resolve, reject) => {
       Papa.parse(url, {
@@ -582,7 +567,7 @@
   function corrColor(c) {
     if (c === null || c === undefined || !Number.isFinite(c)) return "rgba(255,255,255,0.10)";
     const v = Math.max(-1, Math.min(1, c));
-    const hue = v >= 0 ? 220 : 0;
+    const hue = v >= 0 ? 220 : 0; // blue for positive, red for negative
     const alpha = 0.15 + 0.65 * Math.abs(v);
     return `hsla(${hue}, 90%, 60%, ${alpha})`;
   }
@@ -861,65 +846,45 @@
   // -----------------------------
   // Load & Run pipeline
   // -----------------------------
-  async function loadAndMergeFromFiles(trainFile, testFile) {
-    setStatus("parsing CSV files…");
-    setExportStatus("idle");
-
-    const [trainRows, testRows] = await Promise.all([
-      parseCsvFile(trainFile),
-      parseCsvFile(testFile),
-    ]);
-
-    if (!trainRows?.length || !testRows?.length) throw new Error("One of the CSV files looks empty.");
-
-    state.train = trainRows;
-    state.test = testRows;
-    state.merged = mergeDatasets(trainRows, testRows);
-
-    renderKPIs(state.merged);
-    renderPreviewTable(state.merged);
-
-    setStatus("loaded & merged ✅");
-  }
-
-  async function loadAndMergeFromRepo() {
-    setStatus(`fetching from repo… (${REPO_DATA.trainUrl}, ${REPO_DATA.testUrl})`);
-    setExportStatus("idle");
-
-    const [trainRows, testRows] = await Promise.all([
-      parseCsvUrl(REPO_DATA.trainUrl),
-      parseCsvUrl(REPO_DATA.testUrl),
-    ]);
-
-    if (!trainRows?.length || !testRows?.length) {
-      throw new Error("Repo CSV fetch worked, but one file looks empty. Check the paths and file contents.");
-    }
-
-    state.train = trainRows;
-    state.test = testRows;
-    state.merged = mergeDatasets(trainRows, testRows);
-
-    renderKPIs(state.merged);
-    renderPreviewTable(state.merged);
-
-    setStatus("loaded from repo & merged ✅");
-  }
-
   async function loadAndMerge() {
     const trainFile = el.trainFile.files?.[0];
     const testFile = el.testFile.files?.[0];
 
+    setExportStatus("idle");
+
     try {
-      // Prefer uploaded files if present, otherwise fall back to repo URLs
+      let trainRows, testRows;
+
+      // Use uploads if both provided
       if (trainFile && testFile) {
-        await loadAndMergeFromFiles(trainFile, testFile);
+        setStatus("parsing uploaded CSV files…");
+        [trainRows, testRows] = await Promise.all([
+          parseCsvFile(trainFile),
+          parseCsvFile(testFile),
+        ]);
       } else {
-        await loadAndMergeFromRepo();
+        // Otherwise auto-load from repo
+        setStatus("auto-loading CSVs from repo…");
+        [trainRows, testRows] = await Promise.all([
+          parseCsvUrl("Homework1/train.csv"),
+          parseCsvUrl("Homework1/test.csv"),
+        ]);
       }
+
+      if (!trainRows?.length || !testRows?.length) throw new Error("One of the CSV files looks empty.");
+
+      state.train = trainRows;
+      state.test = testRows;
+      state.merged = mergeDatasets(trainRows, testRows);
+
+      renderKPIs(state.merged);
+      renderPreviewTable(state.merged);
+
+      setStatus("loaded & merged ✅");
     } catch (err) {
       console.error(err);
       alertUser(`Load failed: ${err.message || err}`);
-      setStatus("load failed");
+      setStatus(`load failed: ${err.message || err}`);
     }
   }
 
@@ -1010,7 +975,7 @@
       t.querySelector("tbody").innerHTML = "";
     }
 
-    setStatus(AUTOLOAD_FROM_REPO ? "autoload enabled — fetching repo CSV…" : "waiting for files");
+    setStatus("waiting for files");
     setExportStatus("idle");
   }
 
@@ -1032,27 +997,12 @@
     const maybeAutoStatus = () => {
       const trainOk = !!el.trainFile.files?.[0];
       const testOk = !!el.testFile.files?.[0];
-      if (trainOk && testOk) setStatus("files selected — click Load & Merge");
-      else setStatus(AUTOLOAD_FROM_REPO ? "autoload enabled — click Load & Merge (or it will auto-fetch)" : "waiting for files");
+      setStatus(trainOk && testOk ? "files selected — click Load & Merge" : "waiting for files");
     };
     el.trainFile.addEventListener("change", maybeAutoStatus);
     el.testFile.addEventListener("change", maybeAutoStatus);
 
     resetAll();
-
-    // NEW: autoload on page load
-    if (AUTOLOAD_FROM_REPO) {
-      // load immediately, and (optional) run EDA right after load if you want:
-      loadAndMerge()
-        .then(() => {
-          // Uncomment next line if you want EDA to run automatically too:
-          // runEDA();
-        })
-        .catch((e) => {
-          // loadAndMerge already alerts/sets status; this is just belt-and-suspenders
-          console.error("autoload error:", e);
-        });
-    }
   }
 
   init();
