@@ -13,256 +13,314 @@
   <style>
     :root{
       --bg:#0b1020; --panel:#111a33; --muted:#93a4c7; --text:#e8eeff;
-      --border:rgba(255,255,255,.12); --accent:#7aa2ff; --danger:#ff6b6b; --ok:#2ee59d;
+      --border:rgba(255,255,255,.14); --accent:#7aa2ff; --danger:#ff6b6b; --ok:#2ee59d;
+      --card:#0f1730;
     }
     *{box-sizing:border-box}
     body{
-      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 10% 0%, rgba(122,162,255,0.25), transparent 50%),
-                  radial-gradient(900px 600px at 90% 10%, rgba(46,229,157,0.12), transparent 60%),
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(1200px 600px at 20% -10%, rgba(122,162,255,.25), transparent 60%),
+                  radial-gradient(900px 500px at 90% 0%, rgba(46,229,157,.18), transparent 55%),
                   var(--bg);
       color:var(--text);
     }
     header{
-      padding:18px 16px; border-bottom:1px solid var(--border);
-      background: linear-gradient(to bottom, rgba(17,26,51,.75), rgba(17,26,51,.35));
-      position: sticky; top:0; backdrop-filter: blur(8px); z-index:10;
+      padding:22px 16px 10px;
+      max-width:1200px; margin:0 auto;
     }
-    header h1{margin:0 0 6px; font-size:18px; font-weight:900}
-    header p{margin:0; color:var(--muted); font-size:13px; line-height:1.45}
-    main{max-width:1200px; margin:0 auto; padding:16px; display:grid; gap:14px;}
-    section{
-      background: rgba(17,26,51,.70);
-      border:1px solid var(--border);
-      border-radius:14px;
-      padding:14px;
-      box-shadow:0 8px 30px rgba(0,0,0,.25);
+    header h1{margin:0 0 6px; font-size:20px; letter-spacing:.3px}
+    header p{margin:0; color:var(--muted); font-size:13px; line-height:1.4}
+    main{
+      max-width:1200px; margin:0 auto; padding:12px 16px 28px;
+      display:grid; gap:12px;
+      grid-template-columns: 1fr;
     }
-    section h2{
-      margin:0 0 10px; font-size:13px; letter-spacing:.3px; text-transform:uppercase;
-      color:rgba(232,238,255,.92);
-    }
-    .grid{display:grid; gap:14px; grid-template-columns: 1fr;}
     @media (min-width: 980px){
-      .grid.cols-2{grid-template-columns: 1fr 1fr;}
-      .grid.cols-3{grid-template-columns: 1fr 1fr 1fr;}
+      main{ grid-template-columns: 380px 1fr; align-items:start; }
     }
-    .row{display:flex; flex-wrap:wrap; gap:10px; align-items:center;}
-    label{font-size:13px; color:var(--muted);}
-    input[type="file"]{
-      width:100%; padding:10px; border:1px dashed var(--border); border-radius:12px;
-      background: rgba(11,16,32,.35); color:var(--text);
-    }
-    button{
+
+    .panel{
+      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
       border:1px solid var(--border);
-      background: rgba(122,162,255,.20);
-      color:var(--text);
-      padding:10px 12px;
-      border-radius:12px;
-      cursor:pointer;
-      font-weight:800;
-      letter-spacing:.2px;
+      border-radius:16px;
+      padding:14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
     }
-    button:hover{background: rgba(122,162,255,.28);}
-    button.secondary{background: rgba(255,255,255,.06);}
-    button.danger{background: rgba(255,107,107,.18);}
-    .pill{
-      display:inline-flex; gap:8px; align-items:center;
-      padding:6px 10px; border-radius:999px;
-      border:1px solid var(--border);
-      background: rgba(255,255,255,.06);
-      font-size:12px; color:var(--muted);
+    .panel h2{
+      margin:0 0 10px; font-size:14px; letter-spacing:.3px;
+      display:flex; align-items:center; justify-content:space-between;
     }
-    .pill b{color:var(--text);}
-    .note{margin-top:10px; color:var(--muted); font-size:12px; line-height:1.5;}
-    .hint{color:rgba(46,229,157,.9); font-weight:800;}
-    .scroll{
-      overflow:auto; border-radius:12px; border:1px solid var(--border);
-      background: rgba(11,16,32,.35);
+    .badge{
+      font-size:11px; padding:4px 8px; border-radius:999px;
+      background: rgba(122,162,255,.12); border:1px solid rgba(122,162,255,.25); color: var(--text);
     }
-    table{width:100%; border-collapse:collapse; min-width:720px;}
-    th,td{padding:8px 10px; border-bottom:1px solid rgba(255,255,255,.06); font-size:12px; white-space:nowrap;}
-    th{position:sticky; top:0; background: rgba(11,16,32,.85); text-align:left; z-index:2;}
-    .kpis{display:grid; gap:10px; grid-template-columns:1fr;}
-    @media (min-width: 720px){ .kpis{grid-template-columns:1fr 1fr 1fr;} }
-    .kpi{
-      padding:12px; border-radius:14px; border:1px solid var(--border);
-      background: rgba(255,255,255,.06);
+    .muted{color:var(--muted)}
+    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+    .row > *{flex: 1 1 auto}
+    .controls{
+      display:grid; gap:10px;
     }
-    .kpi .label{color:var(--muted); font-size:12px;}
-    .kpi .value{font-size:18px; font-weight:900; margin-top:4px;}
-    .muted{color:var(--muted);}
-    .split{
-      display:grid; gap:14px; grid-template-columns:1fr;
-    }
-    @media (min-width: 980px){ .split{grid-template-columns: 1fr 1fr;} }
-    input[type="range"]{width:260px;}
-    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}
-    .box{
+    .control{
+      background: rgba(0,0,0,.15);
       border:1px solid var(--border);
       border-radius:12px;
       padding:10px;
-      background: rgba(11,16,32,.35);
     }
+    label{display:block; font-size:12px; color:var(--muted); margin-bottom:6px}
+    input[type="file"]{width:100%}
+    input[type="checkbox"]{transform: translateY(1px)}
+    input[type="range"]{width:100%}
+    button{
+      appearance:none; border:1px solid rgba(122,162,255,.35);
+      background: rgba(122,162,255,.12);
+      color:var(--text);
+      padding:10px 10px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:600;
+      transition: transform .06s ease, background .2s ease;
+    }
+    button:hover{background: rgba(122,162,255,.18)}
+    button:active{transform: translateY(1px)}
+    button.secondary{
+      border-color: rgba(255,255,255,.22);
+      background: rgba(255,255,255,.06);
+    }
+    button.danger{
+      border-color: rgba(255,107,107,.45);
+      background: rgba(255,107,107,.12);
+    }
+    button:disabled{
+      opacity:.55; cursor:not-allowed;
+    }
+    .status{
+      font-size:12px; color:var(--muted);
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px dashed rgba(255,255,255,.18);
+      background: rgba(0,0,0,.12);
+      line-height:1.35;
+    }
+    .grid2{
+      display:grid; gap:12px;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 980px){
+      .grid2{ grid-template-columns: 1fr; }
+    }
+    .vis{
+      min-height: 140px;
+      border:1px solid var(--border);
+      background: rgba(0,0,0,.12);
+      border-radius:16px;
+      padding:10px;
+      overflow:auto;
+    }
+    table{
+      width:100%; border-collapse:collapse; font-size:12px;
+    }
+    th, td{
+      border-bottom:1px solid rgba(255,255,255,.08);
+      padding:6px 8px;
+      text-align:left;
+      white-space:nowrap;
+    }
+    th{color:var(--muted); font-weight:600}
+    .kpi{
+      display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px;
+    }
+    .kpi .box{
+      border:1px solid var(--border);
+      background: rgba(0,0,0,.10);
+      border-radius:14px; padding:10px;
+    }
+    .kpi .num{font-size:16px; font-weight:800; margin-top:2px}
+    footer{
+      max-width:1200px; margin:0 auto; padding:0 16px 24px;
+      color:var(--muted); font-size:12px;
+    }
+    code{background: rgba(255,255,255,.06); padding:2px 6px; border-radius:8px; border:1px solid rgba(255,255,255,.12)}
+    a{color: var(--accent)}
   </style>
 </head>
+
 <body>
   <header>
     <h1>Titanic TF.js — Shallow Binary Classifier (Browser-only)</h1>
     <p>
-      Train a single-hidden-layer neural net in the browser using TensorFlow.js.
-      Upload Kaggle <b>train.csv</b> and <b>test.csv</b>, inspect data, preprocess, train, evaluate (ROC/AUC + threshold slider), predict, and export.
+      Runs entirely in your browser (no server). Auto-loads <code>./train.csv</code> and <code>./test.csv</code> from your repo (GitHub Pages),
+      but you can override via file upload.
     </p>
   </header>
 
   <main>
-    <section>
-      <h2>Data Load</h2>
-      <div class="grid cols-2">
-        <div>
-          <label for="trainFile">Upload <b>train.csv</b> (has Survived)</label>
+    <!-- Left: workflow controls -->
+    <section class="panel">
+      <h2>Workflow <span class="badge" id="appVersion">v1</span></h2>
+
+      <div class="controls">
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">1) Data Load</h2>
+          <div class="row" style="margin-bottom:8px">
+            <button id="btnAutoLoad">Auto-load (./train.csv, ./test.csv)</button>
+            <button id="btnClear" class="secondary">Clear</button>
+          </div>
+          <label for="trainFile">Optional override: train.csv</label>
           <input id="trainFile" type="file" accept=".csv" />
-        </div>
-        <div>
-          <label for="testFile">Upload <b>test.csv</b> (no Survived)</label>
+          <label for="testFile" style="margin-top:8px">Optional override: test.csv</label>
           <input id="testFile" type="file" accept=".csv" />
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px;">
-        <button id="btnLoad">Load & Inspect</button>
-        <span class="pill" id="statusPill"><b>Status:</b> waiting for files</span>
-        <span class="pill"><b>Runtime:</b> tfjs + tfjs-vis</span>
-      </div>
-
-      <div class="note">
-        <span class="hint">Deployment note:</span> Create public GitHub repo, commit <b>index.html</b>/<b>app.js</b>, enable Pages (main/root), test URL.
-      </div>
-    </section>
-
-    <section>
-      <h2>Preprocessing</h2>
-      <div class="row">
-        <label><input type="checkbox" id="toggleFamily" checked /> Add FamilySize = SibSp + Parch + 1</label>
-        <label><input type="checkbox" id="toggleAlone" checked /> Add IsAlone = (FamilySize == 1)</label>
-        <button id="btnPreprocess" class="secondary">Run Preprocessing</button>
-        <span class="pill" id="prepPill"><b>Preprocess:</b> idle</span>
-      </div>
-      <div class="note">
-        Impute <b>Age</b> (median) and <b>Embarked</b> (mode). Standardize <b>Age</b> and <b>Fare</b>. One-hot encode <b>Sex</b>, <b>Pclass</b>, <b>Embarked</b>.
-      </div>
-      <div class="box mono" id="prepLog" style="margin-top:10px; white-space:pre-wrap;">—</div>
-    </section>
-
-    <section>
-      <h2>Model</h2>
-      <div class="row">
-        <button id="btnBuildModel">Build Model</button>
-        <button id="btnSaveModel" class="secondary">Save Model</button>
-        <span class="pill" id="modelPill"><b>Model:</b> not built</span>
-      </div>
-      <div class="box mono" id="modelSummary" style="margin-top:10px; white-space:pre-wrap;">—</div>
-    </section>
-
-    <section>
-      <h2>Training</h2>
-      <div class="row">
-        <button id="btnTrain">Train</button>
-        <button id="btnEvaluate" class="secondary">Evaluate</button>
-        <span class="pill" id="trainPill"><b>Train:</b> idle</span>
-      </div>
-      <div class="note">
-        80/20 <b>stratified split</b>, 50 epochs, batch 32, early stopping on val_loss (patience=5). Live curves rendered via tfjs-vis.
-      </div>
-      <div class="split" style="margin-top:10px;">
-        <div class="box" id="visFit"></div>
-        <div class="box" id="visHistory"></div>
-      </div>
-    </section>
-
-    <section>
-      <h2>Metrics (ROC-AUC slider)</h2>
-      <div class="row">
-        <label class="muted">Threshold:</label>
-        <input id="thresholdSlider" type="range" min="0" max="1" step="0.01" value="0.50"/>
-        <span class="pill"><b id="thresholdLabel">0.50</b></span>
-        <span class="pill" id="aucPill"><b>AUC:</b> —</span>
-      </div>
-      <div class="split" style="margin-top:10px;">
-        <div class="box" id="visROC"></div>
-        <div class="box">
-          <div class="muted" style="margin-bottom:8px;">Confusion Matrix + Performance</div>
-          <div class="scroll">
-            <table id="metricsTable">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div class="note muted">Slider updates confusion matrix + Precision/Recall/F1 using validation probabilities.</div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <h2>Prediction</h2>
-      <div class="row">
-        <button id="btnPredict">Predict Test</button>
-        <button id="btnExportSubmission" class="secondary">Download submission.csv</button>
-        <button id="btnExportProbs" class="secondary">Download probabilities.csv</button>
-        <span class="pill" id="predPill"><b>Predict:</b> idle</span>
-      </div>
-      <div class="note">
-        Predict probabilities for test.csv, then apply threshold to produce Survived (0/1). Exports both Kaggle submission and raw probabilities.
-      </div>
-    </section>
-
-    <section>
-      <h2>Export</h2>
-      <div class="row">
-        <button id="btnExportDebug" class="secondary">Download preprocessing summary (JSON)</button>
-        <span class="pill" id="exportPill"><b>Export:</b> idle</span>
-      </div>
-      <div class="note muted">
-        Download JSON summary of preprocessing (imputation values, standardization params, one-hot categories, feature order).
-      </div>
-    </section>
-
-    <section>
-      <h2>Data Preview & Inspection</h2>
-      <div class="kpis">
-        <div class="kpi">
-          <div class="label">Train Rows / Cols</div>
-          <div class="value" id="kpiTrain">—</div>
-        </div>
-        <div class="kpi">
-          <div class="label">Test Rows / Cols</div>
-          <div class="value" id="kpiTest">—</div>
-        </div>
-        <div class="kpi">
-          <div class="label">Missingness (Top 3)</div>
-          <div class="value" id="kpiMissing">—</div>
-        </div>
-      </div>
-
-      <div class="split" style="margin-top:10px;">
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Preview (first 10 rows of train)</div>
-          <div class="scroll">
-            <table id="previewTable">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
+          <div class="status" id="loadStatus" style="margin-top:10px">
+            Status: waiting for data…
           </div>
         </div>
 
-        <div>
-          <div class="muted" style="margin-bottom:8px;">Quick EDA (train): Survived rate by Sex / Pclass</div>
-          <div class="box" id="visEDA"></div>
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">2) Preprocessing</h2>
+          <div class="row">
+            <label style="margin:0; flex:1 1 100%">
+              <input type="checkbox" id="chkFamily" checked />
+              Add <b>FamilySize</b> = SibSp + Parch + 1
+            </label>
+            <label style="margin:0; flex:1 1 100%">
+              <input type="checkbox" id="chkAlone" checked />
+              Add <b>IsAlone</b> = (FamilySize == 1)
+            </label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button id="btnPreprocess" class="secondary">Preprocess</button>
+          </div>
+          <div class="status" id="prepStatus" style="margin-top:10px">
+            Not preprocessed yet.
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">3) Model</h2>
+          <div class="row">
+            <button id="btnBuildModel" class="secondary">Build Model</button>
+            <button id="btnDownloadModel" class="secondary" disabled>Save Model</button>
+          </div>
+          <div class="status" id="modelStatus" style="margin-top:10px">
+            Model: not built.
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">4) Training</h2>
+          <div class="row">
+            <button id="btnTrain" disabled>Train</button>
+            <button id="btnStop" class="danger" disabled>Stop</button>
+          </div>
+          <div class="status" id="trainStatus" style="margin-top:10px">
+            Train: idle (80/20 stratified split, 50 epochs, batch 32, early stopping on val_loss patience=5).
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">5) Metrics (ROC/AUC + Threshold)</h2>
+          <label for="threshold">Classification Threshold: <span id="thrLabel">0.50</span></label>
+          <input id="threshold" type="range" min="0" max="1" step="0.01" value="0.50" />
+          <div class="row" style="margin-top:10px">
+            <button id="btnEvaluate" disabled>Evaluate</button>
+          </div>
+          <div class="status" id="evalStatus" style="margin-top:10px">
+            Evaluate: idle.
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">6) Prediction</h2>
+          <div class="row">
+            <button id="btnPredict" disabled>Predict on test.csv</button>
+          </div>
+          <div class="status" id="predStatus" style="margin-top:10px">
+            Predict: idle.
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">7) Export</h2>
+          <div class="row">
+            <button id="btnDownloadSubmission" class="secondary" disabled>Download submission.csv</button>
+            <button id="btnDownloadProbs" class="secondary" disabled>Download probabilities.csv</button>
+          </div>
+          <div class="status" id="exportStatus" style="margin-top:10px">
+            Export: idle.
+          </div>
+        </div>
+
+        <div class="control">
+          <h2 style="margin:0 0 8px; font-size:13px">Deployment Notes</h2>
+          <div class="status">
+            Create public GitHub repo, commit <code>index.html</code>/<code>app.js</code>, enable Pages (main/root), test URL.
+            Place <code>train.csv</code> and <code>test.csv</code> in the same folder as <code>index.html</code> so auto-load works:
+            <code>./train.csv</code>, <code>./test.csv</code>.
+          </div>
         </div>
       </div>
+    </section>
+
+    <!-- Right: outputs -->
+    <section class="grid2">
+      <section class="panel">
+        <h2>Data Inspection <span class="badge" id="dataBadge">—</span></h2>
+        <div class="kpi" style="margin-bottom:10px">
+          <div class="box">
+            <div class="muted">Train Rows / Cols</div>
+            <div class="num" id="trainShape">—</div>
+          </div>
+          <div class="box">
+            <div class="muted">Test Rows / Cols</div>
+            <div class="num" id="testShape">—</div>
+          </div>
+          <div class="box">
+            <div class="muted">Missingness (Top 3)</div>
+            <div class="num" style="font-size:13px; font-weight:700" id="missingTop3">—</div>
+          </div>
+          <div class="box">
+            <div class="muted">Feature Vector Size</div>
+            <div class="num" id="featSize">—</div>
+          </div>
+        </div>
+
+        <div class="row" style="gap:12px">
+          <div class="vis" style="flex: 1 1 520px">
+            <div class="muted" style="margin-bottom:8px">Preview (first 10 rows of train)</div>
+            <div id="previewTable"></div>
+          </div>
+          <div class="vis" style="flex: 1 1 260px">
+            <div class="muted" style="margin-bottom:8px">Charts (train)</div>
+            <div id="visCharts"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Training & Metrics</h2>
+        <div class="row" style="gap:12px">
+          <div class="vis" style="flex: 1 1 520px">
+            <div class="muted" style="margin-bottom:8px">Live Training Curves</div>
+            <div id="visFit"></div>
+          </div>
+          <div class="vis" style="flex: 1 1 260px">
+            <div class="muted" style="margin-bottom:8px">Confusion Matrix & Metrics</div>
+            <div id="metricsBox"></div>
+          </div>
+        </div>
+
+        <div class="vis" style="margin-top:12px">
+          <div class="muted" style="margin-bottom:8px">ROC Curve</div>
+          <div id="rocBox"></div>
+        </div>
+      </section>
     </section>
   </main>
 
-  <script src="/app.js"></script>
+  <footer>
+    Tip: If you see a 404 on GitHub Pages after deleting files, check the branch/folder setting in Pages,
+    and hard-refresh the page (cache can be weird).
+  </footer>
+
+  <script src="./app.js"></script>
 </body>
 </html>
