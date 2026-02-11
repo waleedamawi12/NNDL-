@@ -7,8 +7,8 @@
 
 /* ----------------------------- Config / Schema ----------------------------- */
 
-const DEFAULT_TRAIN_URL = "./train.csv";
-const DEFAULT_TEST_URL = "./test.csv";
+const DEFAULT_TRAIN_URL = "https://waleedamawi12.github.io/NNDL-/Homework1/train.csv";
+const DEFAULT_TEST_URL = "https://waleedamawi12.github.io/NNDL-/Homework1/test.csv";
 
 // Titanic schema (swap here for reuse)
 const SCHEMA = {
