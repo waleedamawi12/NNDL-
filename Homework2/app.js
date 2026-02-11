@@ -1,229 +1,102 @@
 // app.js
-// Browser-only Titanic shallow classifier using TensorFlow.js + tfjs-vis
-//
-// Reusable note (schema swap):
-// Change SCHEMA.target/features/identifier and update preprocessOneHot() mapping if using another dataset.
-// This file supports loading via file input. (Fetch-based loading could be added for repo-hosted CSVs.)
+// Titanic TF.js — Browser-only shallow binary classifier (no server).
+// IMPORTANT: CSV parsing here correctly handles quoted commas (e.g., "Braund, Mr. Owen Harris").
+// Schema swap point: change FEATURES / TARGET / ID if you reuse for another dataset.
 
 (() => {
-  "use strict";
+  // -------------------------
+  // Schema (swap here to reuse)
+  // -------------------------
+  const ID_COL = "PassengerId";
+  const TARGET_COL = "Survived"; // 0/1
+  const BASE_FEATURES = ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"];
 
-  // ----------------------------
-  // Schema (swap here for other datasets)
-  // ----------------------------
-  const SCHEMA = {
-    identifier: "PassengerId",
-    target: "Survived",
-    features: ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"],
-  };
+  // -------------------------
+  // UI elements
+  // -------------------------
+  const el = (id) => document.getElementById(id);
 
-  // ----------------------------
-  // DOM
-  // ----------------------------
-  const $ = (id) => document.getElementById(id);
+  const trainFileEl = el("https://waleedamawi12.github.io/NNDL-/Homework1/train.csv");
+  const testFileEl = el("https://waleedamawi12.github.io/NNDL-/Homework1/test.csv");
 
-  const el = {
-    trainFile: $("trainFile"),
-    testFile: $("testFile"),
-    btnLoad: $("btnLoad"),
+  const btnAutoLoad = el("btnAutoLoad");
+  const btnClear = el("btnClear");
+  const btnPreprocess = el("btnPreprocess");
+  const btnBuildModel = el("btnBuildModel");
+  const btnTrain = el("btnTrain");
+  const btnStop = el("btnStop");
+  const btnEvaluate = el("btnEvaluate");
+  const btnPredict = el("btnPredict");
+  const btnDownloadSubmission = el("btnDownloadSubmission");
+  const btnDownloadProbs = el("btnDownloadProbs");
+  const btnDownloadModel = el("btnDownloadModel");
 
-    toggleFamily: $("toggleFamily"),
-    toggleAlone: $("toggleAlone"),
-    btnPreprocess: $("btnPreprocess"),
-    prepPill: $("prepPill"),
-    prepLog: $("prepLog"),
+  const chkFamily = el("chkFamily");
+  const chkAlone = el("chkAlone");
 
-    btnBuildModel: $("btnBuildModel"),
-    btnSaveModel: $("btnSaveModel"),
-    modelPill: $("modelPill"),
-    modelSummary: $("modelSummary"),
+  const loadStatus = el("loadStatus");
+  const prepStatus = el("prepStatus");
+  const modelStatus = el("modelStatus");
+  const trainStatus = el("trainStatus");
+  const evalStatus = el("evalStatus");
+  const predStatus = el("predStatus");
+  const exportStatus = el("exportStatus");
 
-    btnTrain: $("btnTrain"),
-    btnEvaluate: $("btnEvaluate"),
-    trainPill: $("trainPill"),
+  const trainShapeEl = el("trainShape");
+  const testShapeEl = el("testShape");
+  const missingTop3El = el("missingTop3");
+  const featSizeEl = el("featSize");
+  const previewTableEl = el("previewTable");
 
-    thresholdSlider: $("thresholdSlider"),
-    thresholdLabel: $("thresholdLabel"),
-    aucPill: $("aucPill"),
-    metricsTable: $("metricsTable"),
+  const thresholdEl = el("threshold");
+  const thrLabelEl = el("thrLabel");
 
-    btnPredict: $("btnPredict"),
-    btnExportSubmission: $("btnExportSubmission"),
-    btnExportProbs: $("btnExportProbs"),
-    predPill: $("predPill"),
+  const visCharts = el("visCharts");
+  const visFit = el("visFit");
+  const metricsBox = el("metricsBox");
+  const rocBox = el("rocBox");
 
-    btnExportDebug: $("btnExportDebug"),
-    exportPill: $("exportPill"),
-
-    statusPill: $("statusPill"),
-
-    kpiTrain: $("kpiTrain"),
-    kpiTest: $("kpiTest"),
-    kpiMissing: $("kpiMissing"),
-
-    previewTable: $("previewTable"),
-
-    visEDA: $("visEDA"),
-    visFit: $("visFit"),
-    visHistory: $("visHistory"), // We'll reuse this area to render gate feature-importance chart.
-    visROC: $("visROC"),
-  };
-
-  function setPill(pillEl, label, value) {
-    pillEl.innerHTML = `<b>${escapeHtml(label)}:</b> ${escapeHtml(value)}`;
-  }
-  function escapeHtml(s) {
-    return String(s)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-  function alertUser(msg) {
-    window.alert(msg);
-  }
-
-  // ----------------------------
-  // State
-  // ----------------------------
+  // -------------------------
+  // App state
+  // -------------------------
   const state = {
-    raw: {
-      trainRows: null,
-      testRows: null,
-    },
-    inspect: {
-      missingPct: null,
-    },
-    prep: {
-      // Learned preprocessing parameters
-      ageMedian: null,
-      embarkedMode: null,
-      ageMean: null,
-      ageStd: null,
-      fareMean: null,
-      fareStd: null,
-      // Categories for one-hot (fit on train, apply to both)
-      cats: {
-        Sex: [],
-        Pclass: [],
-        Embarked: [],
-      },
-      // Feature order after one-hot + engineered
-      featureNames: [],
-      // Debug summary object (for export)
-      summary: null,
-    },
-    tensors: {
-      xTrain: null,
-      yTrain: null,
-      xVal: null,
-      yVal: null,
-      xTest: null,
-      testPassengerIds: null,
-    },
+    rawTrain: null,
+    rawTest: null,
+    prep: null, // fitted preprocessing params
+    Xtrain: null,
+    ytrain: null,
+    Xval: null,
+    yval: null,
+    valProbs: null,
+    valPreds: null,
     model: null,
-    eval: {
-      // Cached validation probabilities + labels for threshold slider updates
-      valProbs: null, // Float32Array
-      valLabels: null, // Int32Array
-      auc: null,
-      roc: null, // {fpr:[], tpr:[]}
-    },
-    pred: {
-      testProbs: null, // Float32Array
-      threshold: 0.5,
-    },
+    testIds: null,
+    testProbs: null,
+    testPreds: null,
+    stopRequested: false
   };
 
-  // ----------------------------
-  // (HW2 Task 4) Sigmoid Gate (Mask) Layer for Feature Importance
-  // ----------------------------
-  // Learns a per-feature gate g = sigmoid(w), then outputs x * g (Hadamard product).
-  // Gate values are directly interpretable as feature importance (0..1).
-  class SigmoidGate extends tf.layers.Layer {
-    constructor(config) {
-      super(config || {});
-      this.supportsMasking = true;
-    }
-
-    build(inputShape) {
-      const inputDim = inputShape[inputShape.length - 1];
-      // Trainable logits; sigmoid(logit)=0.5 at init.
-      this.w = this.addWeight(
-        "gate_logits",
-        [inputDim],
-        "float32",
-        tf.initializers.zeros(),
-        // Optional L1 regularization encourages sparsity for clearer importance.
-        tf.regularizers.l1({ l1: 1e-3 })
-      );
-      this.built = true;
-    }
-
-    call(inputs) {
-      return tf.tidy(() => {
-        const x = Array.isArray(inputs) ? inputs[0] : inputs; // [batch, d]
-        const g = tf.sigmoid(this.w.read()); // [d], values in (0,1)
-        return x.mul(g); // broadcast multiply -> masked input
-      });
-    }
-
-    computeOutputShape(inputShape) {
-      return inputShape;
-    }
-
-    getConfig() {
-      const base = super.getConfig();
-      return { ...base };
-    }
-
-    static get className() {
-      return "SigmoidGate";
-    }
+  // -------------------------
+  // Helpers (status, alerts)
+  // -------------------------
+  function setStatus(node, text) {
+    node.textContent = text;
   }
-  tf.serialization.registerClass(SigmoidGate);
-
-  function renderGateImportance() {
-    if (!state.model || !state.prep.featureNames?.length) return;
-
-    let gateLayer;
-    try {
-      gateLayer = state.model.getLayer("sigmoid_gate");
-    } catch {
-      return;
-    }
-    if (!gateLayer) return;
-
-    // gate logits -> sigmoid -> importance
-    const logits = gateLayer.getWeights()[0]; // tensor [d]
-    const imp = tf.sigmoid(logits).dataSync(); // Float32Array length d
-
-    const items = state.prep.featureNames
-      .map((name, i) => ({ x: name, y: Number(imp[i]) }))
-      .sort((a, b) => b.y - a.y);
-
-    // Render into the right-side training panel (visHistory)
-    el.visHistory.innerHTML = "";
-    tfvis.render.barchart(
-      el.visHistory,
-      items,
-      {
-        title: "Sigmoid Gate Feature Importance (0..1)",
-        xLabel: "Feature",
-        yLabel: "Gate value",
-        height: 360,
-      }
-    );
+  function warn(msg) {
+    alert(msg);
+  }
+  function clamp01(x) {
+    return Math.max(0, Math.min(1, x));
   }
 
-  // ----------------------------
-  // CSV Loading (safe CSV parsing without comma-escape bugs)
-  // ----------------------------
-  // IMPORTANT: We do not use naive split(',') parsing. That breaks on quoted commas (e.g. Name field).
-  // We implement a small RFC4180-ish parser here to handle quotes correctly.
-  // If you want, you can swap this out for PapaParse (not required in HW2 prompt).
-  function parseCSVText(text) {
+  // -------------------------
+  // CSV parser (handles quoted commas + newlines)
+  // -------------------------
+  function parseCSV(text) {
+    // Returns array of rows (array of fields). Handles:
+    // - commas inside quotes
+    // - escaped quotes ("")
+    // - CRLF / LF line endings
     const rows = [];
     let row = [];
     let field = "";
@@ -235,8 +108,8 @@
 
       if (inQuotes) {
         if (c === '"' && next === '"') {
-          field += '"'; // escaped quote
-          i++;
+          field += '"';
+          i++; // skip second quote
         } else if (c === '"') {
           inQuotes = false;
         } else {
@@ -251,465 +124,463 @@
         } else if (c === "\n") {
           row.push(field);
           field = "";
-          // ignore possible \r already removed or handle it
-          rows.push(row);
+          // push row if not empty (avoid trailing blank line noise)
+          if (!(row.length === 1 && row[0] === "")) rows.push(row);
           row = [];
         } else if (c === "\r") {
-          // ignore
+          // ignore \r (CRLF)
         } else {
           field += c;
         }
       }
     }
-    // last field
+    // flush last field
     row.push(field);
-    rows.push(row);
+    if (!(row.length === 1 && row[0] === "")) rows.push(row);
 
-    // Convert to objects using header row
-    const header = rows[0];
-    const out = [];
+    // Normalize: remove completely empty last row if any
+    while (rows.length && rows[rows.length - 1].every((v) => (v ?? "").trim() === "")) rows.pop();
+
+    return rows;
+  }
+
+  function csvToObjects(text) {
+    const rows = parseCSV(text);
+    if (!rows.length) throw new Error("CSV is empty.");
+    const header = rows[0].map((h) => (h ?? "").trim());
+    const data = [];
     for (let r = 1; r < rows.length; r++) {
-      if (rows[r].length === 1 && rows[r][0] === "") continue; // skip empty last line
       const obj = {};
       for (let c = 0; c < header.length; c++) {
         obj[header[c]] = rows[r][c] ?? "";
       }
-      out.push(obj);
+      data.push(obj);
     }
-    return out;
+    return data;
   }
 
+  // -------------------------
+  // Loaders
+  // -------------------------
   async function readFileAsText(file) {
-    return await file.text();
-  }
-
-  async function fetchText(url) {
-    // cache-bust so GitHub Pages updates show immediately
-    const bust = (url.includes("?") ? "&" : "?") + "v=" + Date.now();
-    const res = await fetch(url + bust, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-    return await res.text();
-  }
-
-  async function loadFromRepoAuto() {
-    // Try common repo locations (relative to the deployed page).
-    const candidates = [
-      { train: "train.csv", test: "test.csv" },
-      { train: "data/train.csv", test: "data/test.csv" },
-      { train: "assets/train.csv", test: "assets/test.csv" },
-    ];
-
-    let lastErr = null;
-    for (const cand of candidates) {
-      try {
-        setPill(el.statusPill, "Status", `auto-loading ${cand.train} + ${cand.test}…`);
-        const [trainText, testText] = await Promise.all([
-          fetchText(cand.train),
-          fetchText(cand.test),
-        ]);
-        return { trainText, testText, source: `${cand.train} & ${cand.test}` };
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error("Auto-load failed.");
-  }
-
-  function dynamicType(v) {
-    // Convert strings to numbers when appropriate; keep empty as ""
-    if (v === null || v === undefined) return "";
-    const s = String(v).trim();
-    if (s === "") return "";
-    // Kaggle has "NaN" sometimes; treat as empty
-    if (s.toLowerCase() === "nan") return "";
-    const n = Number(s);
-    if (Number.isFinite(n) && s !== "") return n;
-    return s;
-  }
-
-  function typeRows(rows) {
-    // Convert each field with dynamicType
-    return rows.map((r) => {
-      const o = {};
-      for (const k of Object.keys(r)) o[k] = dynamicType(r[k]);
-      return o;
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(new Error("File read failed."));
+      fr.readAsText(file);
     });
   }
 
-  async function loadFromFileInputs() {
-    const trainFile = el.trainFile.files?.[0];
-    const testFile = el.testFile.files?.[0];
+  async function loadCSVFromFileInput(fileEl) {
+    if (!fileEl.files || !fileEl.files[0]) return null;
+    const text = await readFileAsText(fileEl.files[0]);
+    return csvToObjects(text);
+  }
+
+  async function loadCSVFromFetch(path) {
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Fetch failed: ${path} (${res.status})`);
+    const text = await res.text();
+    return csvToObjects(text);
+  }
+
+  async function loadData({ preferUploads = true } = {}) {
+    setStatus(loadStatus, "Status: loading CSV files…");
 
     try {
-      setPill(el.statusPill, "Status", "loading CSV…");
+      // Prefer file uploads if present (optional override)
+      let train = null;
+      let test = null;
 
-      let trainText, testText, sourceNote;
-
-      if (trainFile && testFile) {
-        [trainText, testText] = await Promise.all([
-          readFileAsText(trainFile),
-          readFileAsText(testFile),
-        ]);
-        sourceNote = "uploaded files";
-      } else {
-        // NEW: auto-load from repo if no files chosen
-        const auto = await loadFromRepoAuto();
-        trainText = auto.trainText;
-        testText = auto.testText;
-        sourceNote = auto.source;
+      if (preferUploads) {
+        train = await loadCSVFromFileInput(trainFileEl);
+        test = await loadCSVFromFileInput(testFileEl);
       }
 
-      // Robust parsing with quote handling fixes "comma escape problem"
-      const trainRows = typeRows(parseCSVText(trainText));
-      const testRows = typeRows(parseCSVText(testText));
+      // Auto-load from repo defaults if not provided
+      if (!train) train = await loadCSVFromFetch("./train.csv");
+      if (!test) test = await loadCSVFromFetch("./test.csv");
 
-      if (!trainRows.length || !testRows.length) throw new Error("CSV appears empty.");
-      if (!(SCHEMA.target in trainRows[0])) {
-        throw new Error(`train.csv must contain target column "${SCHEMA.target}".`);
-      }
+      // Basic schema sanity
+      if (!train.length || !test.length) throw new Error("Train/Test data is empty.");
+      if (!(TARGET_COL in train[0])) throw new Error(`Missing target column '${TARGET_COL}' in train.csv`);
+      if (!(ID_COL in train[0]) || !(ID_COL in test[0])) throw new Error(`Missing id column '${ID_COL}'`);
 
-      state.raw.trainRows = trainRows;
-      state.raw.testRows = testRows;
+      state.rawTrain = train;
+      state.rawTest = test;
 
-      setPill(el.statusPill, "Status", `loaded ✅ (${sourceNote})`);
-      return { trainRows, testRows };
-    } catch (e) {
-      console.error(e);
-      alertUser(
-        `Load failed: ${e.message || e}\n\nAuto-load looks for:\n- train.csv & test.csv\n- data/train.csv & data/test.csv\n- assets/train.csv & assets/test.csv\n\nOr upload both files manually.`
-      );
-      setPill(el.statusPill, "Status", "load failed");
-      return null;
+      renderInspection();
+      renderCharts();
+
+      setStatus(loadStatus, `Status: loaded ✓ (train=${train.length} rows, test=${test.length} rows)`);
+      setStatus(prepStatus, "Not preprocessed yet.");
+      setStatus(modelStatus, "Model: not built.");
+      setStatus(trainStatus, "Train: idle.");
+      setStatus(evalStatus, "Evaluate: idle.");
+      setStatus(predStatus, "Predict: idle.");
+      setStatus(exportStatus, "Export: idle.");
+
+      // Enable next step
+      btnPreprocess.disabled = false;
+      btnBuildModel.disabled = true;
+      btnTrain.disabled = true;
+      btnEvaluate.disabled = true;
+      btnPredict.disabled = true;
+      btnDownloadSubmission.disabled = true;
+      btnDownloadProbs.disabled = true;
+      btnDownloadModel.disabled = true;
+
+      // Reset state downstream
+      resetPipelineFrom("prep");
+
+    } catch (err) {
+      console.error(err);
+      setStatus(loadStatus, `Status: error — ${err.message}`);
+      warn(`Data load error:\n${err.message}\n\nTip: Make sure train.csv/test.csv are in the same folder as index.html on GitHub Pages.`);
     }
   }
 
-  // ----------------------------
-  // Inspection: preview, shape, missing %, survival charts
-  // ----------------------------
-  function getColumns(rows) {
-    const set = new Set();
-    for (const r of rows) Object.keys(r).forEach((k) => set.add(k));
-    return [...set];
-  }
-
-  function isMissing(v) {
-    return v === "" || v === null || v === undefined;
-  }
-
-  function missingPct(rows) {
-    const cols = getColumns(rows);
-    const total = rows.length;
-    const miss = {};
-    cols.forEach((c) => (miss[c] = 0));
-    for (const r of rows) {
-      for (const c of cols) if (isMissing(r[c])) miss[c] += 1;
+  function resetPipelineFrom(stage) {
+    // stage: "prep" | "model" | "train" | "predict"
+    if (stage === "prep") {
+      state.prep = null;
+      state.Xtrain = state.ytrain = state.Xval = state.yval = null;
+      state.valProbs = state.valPreds = null;
+      state.testIds = state.testProbs = state.testPreds = null;
+      state.model = null;
+      clearVis();
+      featSizeEl.textContent = "—";
     }
-    const arr = cols.map((c) => ({ col: c, pct: total ? (miss[c] / total) * 100 : 0 }));
-    arr.sort((a, b) => b.pct - a.pct);
-    return arr;
   }
 
-  function renderPreviewTable(rows, n = 10) {
-    const sample = rows.slice(0, n);
-    const cols = getColumns(sample);
-
-    const thead = el.previewTable.querySelector("thead");
-    const tbody = el.previewTable.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    const trh = document.createElement("tr");
-    cols.forEach((c) => {
-      const th = document.createElement("th");
-      th.textContent = c;
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-
-    sample.forEach((r) => {
-      const tr = document.createElement("tr");
-      cols.forEach((c) => {
-        const td = document.createElement("td");
-        const v = r[c];
-        td.textContent = isMissing(v) ? "—" : String(v);
-        tr.appendChild(td);
-      });
-      tbody.appendChild(tr);
-    });
+  function clearVis() {
+    visFit.innerHTML = "";
+    metricsBox.innerHTML = "";
+    rocBox.innerHTML = "";
   }
 
-  function survivalRateBy(trainRows, col) {
-    // returns [{key, rate, n}]
+  // -------------------------
+  // Inspection UI
+  // -------------------------
+  function renderInspection() {
+    const train = state.rawTrain;
+    const test = state.rawTest;
+    if (!train || !test) return;
+
+    trainShapeEl.textContent = `${train.length} / ${Object.keys(train[0]).length}`;
+    testShapeEl.textContent = `${test.length} / ${Object.keys(test[0]).length}`;
+
+    // Missingness (overall on train for readability)
+    const cols = Object.keys(train[0]);
+    const missing = cols.map((c) => {
+      let m = 0;
+      for (const r of train) {
+        const v = (r[c] ?? "").trim();
+        if (v === "" || v.toLowerCase() === "null" || v.toLowerCase() === "nan") m++;
+      }
+      return { col: c, pct: (100 * m) / train.length };
+    }).sort((a, b) => b.pct - a.pct);
+
+    const top3 = missing.slice(0, 3).map((d) => `${d.col}: ${d.pct.toFixed(1)}%`).join(" • ");
+    missingTop3El.textContent = top3 || "—";
+
+    // Preview table (first 10 rows of train)
+    const preview = train.slice(0, 10);
+    previewTableEl.innerHTML = makeTable(preview, [
+      "PassengerId","Survived","Pclass","Name","Sex","Age","SibSp","Parch","Ticket","Fare","Cabin","Embarked"
+    ]);
+  }
+
+  function makeTable(rows, preferredCols = null) {
+    if (!rows || !rows.length) return "<div class='muted'>No rows.</div>";
+    const allCols = Object.keys(rows[0]);
+    const cols = (preferredCols || allCols).filter((c) => allCols.includes(c));
+    const head = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>`;
+    const body = rows.map((r) => {
+      return `<tr>${cols.map((c) => `<td>${escapeHtml(String(r[c] ?? ""))}</td>`).join("")}</tr>`;
+    }).join("");
+    return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (m) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m]));
+  }
+
+  function renderCharts() {
+    const train = state.rawTrain;
+    if (!train) return;
+    visCharts.innerHTML = "";
+
+    // Survival by Sex
+    const bySex = groupRate(train, "Sex", TARGET_COL);
+    tfvis.render.barchart(
+      visCharts,
+      { values: bySex.map((d) => ({ x: d.key, y: d.rate })) },
+      { title: "Survival rate by Sex", xLabel: "Sex", yLabel: "Rate", height: 180 }
+    );
+
+    // Survival by Pclass
+    const byPclass = groupRate(train, "Pclass", TARGET_COL);
+    tfvis.render.barchart(
+      visCharts,
+      { values: byPclass.map((d) => ({ x: d.key, y: d.rate })) },
+      { title: "Survival rate by Pclass", xLabel: "Pclass", yLabel: "Rate", height: 180 }
+    );
+  }
+
+  function groupRate(rows, keyCol, targetCol) {
     const map = new Map();
-    for (const r of trainRows) {
-      const k = r[col];
-      const y = r[SCHEMA.target];
-      if (isMissing(k) || (y !== 0 && y !== 1)) continue;
-      const key = String(k);
-      if (!map.has(key)) map.set(key, { n: 0, s: 0 });
-      const obj = map.get(key);
+    for (const r of rows) {
+      const k = (r[keyCol] ?? "").trim();
+      const y = Number((r[targetCol] ?? "").trim());
+      if (!map.has(k)) map.set(k, { key: k, n: 0, s: 0 });
+      const obj = map.get(k);
       obj.n += 1;
       obj.s += (y === 1 ? 1 : 0);
     }
-    const out = [...map.entries()].map(([key, v]) => ({
-      key,
-      n: v.n,
-      rate: v.n ? (v.s / v.n) * 100 : 0,
-    }));
+    const out = Array.from(map.values()).map((d) => ({ key: d.key, rate: d.n ? d.s / d.n : 0 }));
+    // Nice ordering for Pclass
     out.sort((a, b) => {
-      const an = Number(a.key), bn = Number(b.key);
-      if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-      return a.key.localeCompare(b.key);
+      const na = Number(a.key), nb = Number(b.key);
+      if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+      return String(a.key).localeCompare(String(b.key));
     });
     return out;
   }
 
-  function renderQuickEDA(trainRows) {
-    el.visEDA.innerHTML = ""; // clear
-    const bySex = survivalRateBy(trainRows, "Sex");
-    const byPclass = survivalRateBy(trainRows, "Pclass");
-
-    // tfjs-vis bar charts
-    tfvis.render.barchart(
-      el.visEDA,
-      bySex.map((d) => ({ x: d.key, y: d.rate })),
-      { title: "Survival rate by Sex (train)", xLabel: "Sex", yLabel: "Survival rate (%)" }
-    );
-    tfvis.render.barchart(
-      el.visEDA,
-      byPclass.map((d) => ({ x: d.key, y: d.rate })),
-      { title: "Survival rate by Pclass (train)", xLabel: "Pclass", yLabel: "Survival rate (%)" }
-    );
-  }
-
-  function renderKPIs(trainRows, testRows) {
-    el.kpiTrain.textContent = `${trainRows.length} / ${getColumns(trainRows).length}`;
-    el.kpiTest.textContent = `${testRows.length} / ${getColumns(testRows).length}`;
-
-    const miss = missingPct(trainRows);
-    state.inspect.missingPct = miss;
-    const top3 = miss
-      .slice(0, 3)
-      .map((d) => `${d.col} ${d.pct.toFixed(1)}%`)
-      .join(" • ");
-    el.kpiMissing.textContent = top3 || "—";
-  }
-
-  // ----------------------------
+  // -------------------------
   // Preprocessing
-  // ----------------------------
-  function median(nums) {
-    if (!nums.length) return null;
-    const a = [...nums].sort((x, y) => x - y);
-    const m = Math.floor(a.length / 2);
-    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  // -------------------------
+  function toNumberOrNull(v) {
+    const s = (v ?? "").toString().trim();
+    if (s === "" || s.toLowerCase() === "null" || s.toLowerCase() === "nan") return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
   }
 
   function mode(values) {
-    const map = new Map();
+    const freq = new Map();
     for (const v of values) {
-      if (isMissing(v)) continue;
-      const k = String(v);
-      map.set(k, (map.get(k) || 0) + 1);
+      const key = v == null ? "" : String(v);
+      if (!key) continue;
+      freq.set(key, (freq.get(key) || 0) + 1);
     }
-    let best = null,
-      bestN = -1;
-    for (const [k, n] of map.entries()) {
-      if (n > bestN) {
-        bestN = n;
-        best = k;
-      }
+    let best = null, bestC = -1;
+    for (const [k, c] of freq.entries()) {
+      if (c > bestC) { best = k; bestC = c; }
     }
     return best;
   }
 
+  function median(nums) {
+    const arr = nums.filter((x) => Number.isFinite(x)).slice().sort((a, b) => a - b);
+    if (!arr.length) return 0;
+    const mid = Math.floor(arr.length / 2);
+    return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+  }
+
   function meanStd(nums) {
-    if (!nums.length) return { mean: 0, std: 1 };
-    const mean = nums.reduce((s, x) => s + x, 0) / nums.length;
-    const v = nums.reduce((s, x) => s + (x - mean) ** 2, 0) / Math.max(1, nums.length - 1);
-    const std = Math.sqrt(v) || 1;
+    const arr = nums.filter((x) => Number.isFinite(x));
+    if (!arr.length) return { mean: 0, std: 1 };
+    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+    const varr = arr.reduce((a, b) => a + (b - mean) * (b - mean), 0) / arr.length;
+    const std = Math.sqrt(varr) || 1;
     return { mean, std };
   }
 
-  function addEngineeredFeatures(row, useFamily, useAlone) {
-    const out = { ...row };
-    if (useFamily || useAlone) {
-      const sib = Number(out.SibSp);
-      const par = Number(out.Parch);
-      const familySize =
-        (Number.isFinite(sib) ? sib : 0) + (Number.isFinite(par) ? par : 0) + 1;
-      if (useFamily) out.FamilySize = familySize;
-      if (useAlone) out.IsAlone = familySize === 1 ? 1 : 0;
-    }
+  function oneHot(categories, value) {
+    const out = new Array(categories.length).fill(0);
+    const idx = categories.indexOf(value);
+    if (idx >= 0) out[idx] = 1;
     return out;
   }
 
-  function fitPreprocessParams(trainRows) {
-    // Impute Age median
-    const ages = trainRows
-      .map((r) => r.Age)
-      .filter((v) => typeof v === "number" && Number.isFinite(v));
+  function fitPreprocessing(trainRows) {
+    // Fit only on train. Save params to apply consistently to val/test.
+    const ages = trainRows.map((r) => toNumberOrNull(r.Age)).filter((x) => x != null);
+    const fares = trainRows.map((r) => toNumberOrNull(r.Fare)).filter((x) => x != null);
+
     const ageMedian = median(ages);
+    const embarkedMode = mode(trainRows.map((r) => (r.Embarked ?? "").trim())) || "S";
 
-    // Embarked mode (categorical)
-    const embarkedMode = mode(trainRows.map((r) => r.Embarked));
+    // Standardize only numeric we use (Age/Fare)
+    const { mean: ageMean, std: ageStd } = meanStd(trainRows.map((r) => {
+      const n = toNumberOrNull(r.Age);
+      return n == null ? ageMedian : n;
+    }));
+    const { mean: fareMean, std: fareStd } = meanStd(trainRows.map((r) => {
+      const n = toNumberOrNull(r.Fare);
+      return n == null ? 0 : n;
+    }));
 
-    // For standardization: compute on train AFTER imputation
-    const imputedAges = trainRows
-      .map((r) => (typeof r.Age === "number" ? r.Age : ageMedian))
-      .filter((v) => typeof v === "number");
-    const fares = trainRows
-      .map((r) => r.Fare)
-      .filter((v) => typeof v === "number" && Number.isFinite(v));
-
-    const ageMS = meanStd(imputedAges);
-    const fareMS = meanStd(fares);
-
-    // One-hot categories fit on train
-    const sexCats = [...new Set(trainRows.map((r) => String(r.Sex)).filter((v) => v && v !== "undefined"))].sort();
-    const pclassCats = [
-      ...new Set(trainRows.map((r) => String(r.Pclass)).filter((v) => v && v !== "undefined")),
-    ].sort((a, b) => Number(a) - Number(b));
-    const embarkedCats = [
-      ...new Set(
-        trainRows
-          .map((r) => String(r.Embarked || embarkedMode))
-          .filter((v) => v && v !== "undefined")
-      ),
-    ].sort();
+    // One-hot categories: derive from train
+    const sexCats = Array.from(new Set(trainRows.map((r) => (r.Sex ?? "").trim()).filter(Boolean))).sort();
+    const pclassCats = Array.from(new Set(trainRows.map((r) => (r.Pclass ?? "").trim()).filter(Boolean))).sort((a, b) => Number(a) - Number(b));
+    const embarkedCats = Array.from(new Set(trainRows.map((r) => {
+      const e = (r.Embarked ?? "").trim();
+      return e ? e : embarkedMode;
+    }).filter(Boolean))).sort();
 
     return {
       ageMedian,
       embarkedMode,
-      ageMean: ageMS.mean,
-      ageStd: ageMS.std,
-      fareMean: fareMS.mean,
-      fareStd: fareMS.std,
-      cats: { Sex: sexCats, Pclass: pclassCats, Embarked: embarkedCats },
+      scaler: { ageMean, ageStd, fareMean, fareStd },
+      cats: { sexCats, pclassCats, embarkedCats }
     };
   }
 
-  function zscore(x, mean, std) {
-    const v = (x - mean) / (std || 1);
-    return Number.isFinite(v) ? v : 0;
-  }
-
-  function oneHot(value, categories) {
-    const v = String(value);
-    return categories.map((c) => (v === String(c) ? 1 : 0));
-  }
-
-  function preprocessRows(rows, params, { useFamily, useAlone, includeTarget }) {
-    // Build feature vector for each row, matching a fixed feature order.
-    // One-hot order is stable based on params.cats.
+  function featurizeRows(rows, prep, { addFamilySize, addIsAlone, includeTarget } = {}) {
+    const { ageMedian, embarkedMode, scaler, cats } = prep;
     const featureNames = [];
 
-    // numeric
+    // One-hot names
+    for (const c of cats.pclassCats) featureNames.push(`Pclass_${c}`);
+    for (const c of cats.sexCats) featureNames.push(`Sex_${c}`);
     featureNames.push("Age_z");
-    featureNames.push("Fare_z");
     featureNames.push("SibSp");
     featureNames.push("Parch");
+    featureNames.push("Fare_z");
+    for (const c of cats.embarkedCats) featureNames.push(`Embarked_${c}`);
 
-    // optional engineered
-    if (useFamily) featureNames.push("FamilySize");
-    if (useAlone) featureNames.push("IsAlone");
-
-    // one-hot Sex
-    params.cats.Sex.forEach((c) => featureNames.push(`Sex_${c}`));
-    // one-hot Pclass
-    params.cats.Pclass.forEach((c) => featureNames.push(`Pclass_${c}`));
-    // one-hot Embarked
-    params.cats.Embarked.forEach((c) => featureNames.push(`Embarked_${c}`));
+    if (addFamilySize) featureNames.push("FamilySize");
+    if (addIsAlone) featureNames.push("IsAlone");
 
     const X = [];
     const y = [];
     const ids = [];
 
-    for (const r0 of rows) {
-      const r = addEngineeredFeatures(r0, useFamily, useAlone);
+    for (const r of rows) {
+      const pclass = (r.Pclass ?? "").trim();
+      const sex = (r.Sex ?? "").trim();
+      const sibsp = toNumberOrNull(r.SibSp) ?? 0;
+      const parch = toNumberOrNull(r.Parch) ?? 0;
 
-      // Identifier for exports
-      const pid = r[SCHEMA.identifier];
-      ids.push(pid);
+      const rawAge = toNumberOrNull(r.Age);
+      const age = rawAge == null ? ageMedian : rawAge;
 
-      // Impute
-      const age = typeof r.Age === "number" && Number.isFinite(r.Age) ? r.Age : params.ageMedian;
-      const embarked = !isMissing(r.Embarked) ? r.Embarked : params.embarkedMode;
+      const rawFare = toNumberOrNull(r.Fare);
+      const fare = rawFare == null ? 0 : rawFare;
 
-      // Standardize Age/Fare
-      const ageZ = zscore(Number(age), params.ageMean, params.ageStd);
-      const fareZ = zscore(Number(r.Fare), params.fareMean, params.fareStd);
+      const embarkedRaw = (r.Embarked ?? "").trim();
+      const embarked = embarkedRaw ? embarkedRaw : embarkedMode;
 
-      const sib = Number(r.SibSp);
-      const par = Number(r.Parch);
+      const ageZ = (age - scaler.ageMean) / (scaler.ageStd || 1);
+      const fareZ = (fare - scaler.fareMean) / (scaler.fareStd || 1);
 
-      const vec = [];
-      vec.push(ageZ);
-      vec.push(fareZ);
-      vec.push(Number.isFinite(sib) ? sib : 0);
-      vec.push(Number.isFinite(par) ? par : 0);
+      const vec = []
+        .concat(oneHot(cats.pclassCats, pclass))
+        .concat(oneHot(cats.sexCats, sex))
+        .concat([ageZ, sibsp, parch, fareZ])
+        .concat(oneHot(cats.embarkedCats, embarked));
 
-      if (useFamily) vec.push(Number(r.FamilySize) || 1);
-      if (useAlone) vec.push(Number(r.IsAlone) || 0);
-
-      // one-hot categoricals
-      vec.push(...oneHot(r.Sex, params.cats.Sex));
-      vec.push(...oneHot(r.Pclass, params.cats.Pclass));
-      vec.push(...oneHot(embarked, params.cats.Embarked));
+      let familySize = null;
+      if (addFamilySize || addIsAlone) {
+        familySize = sibsp + parch + 1;
+      }
+      if (addFamilySize) vec.push(familySize);
+      if (addIsAlone) vec.push(familySize === 1 ? 1 : 0);
 
       X.push(vec);
 
       if (includeTarget) {
-        const t = r[SCHEMA.target];
-        y.push(t === 1 ? 1 : 0);
+        const yy = toNumberOrNull(r[TARGET_COL]);
+        y.push(yy == null ? 0 : (yy >= 1 ? 1 : 0));
       }
+
+      ids.push((r[ID_COL] ?? "").trim());
     }
 
     return { X, y, ids, featureNames };
   }
 
-  function toTensor2D(X) {
-    return tf.tensor2d(X, [X.length, X[0].length], "float32");
-  }
-  function toTensor1D(y) {
-    return tf.tensor1d(y, "float32");
-  }
-
-  function stratifiedSplit(X, y, valFrac = 0.2, seed = 42) {
-    // Simple stratified split by label
-    const idx0 = [];
-    const idx1 = [];
-    for (let i = 0; i < y.length; i++) (y[i] === 1 ? idx1 : idx0).push(i);
-
-    // deterministic shuffle
-    function mulberry32(a) {
-      return function () {
-        let t = (a += 0x6d2b79f5);
-        t = Math.imul(t ^ (t >>> 15), t | 1);
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-      };
+  function preprocess() {
+    const train = state.rawTrain;
+    const test = state.rawTest;
+    if (!train || !test) {
+      warn("Load train.csv and test.csv first.");
+      return;
     }
-    const rand = mulberry32(seed);
 
-    function shuffle(arr) {
-      for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(rand() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
+    try {
+      const addFamilySize = chkFamily.checked;
+      const addIsAlone = chkAlone.checked;
+
+      const prep = fitPreprocessing(train);
+      const trainFeat = featurizeRows(train, prep, { addFamilySize, addIsAlone, includeTarget: true });
+      const testFeat = featurizeRows(test, prep, { addFamilySize, addIsAlone, includeTarget: false });
+
+      // Ensure same feature size
+      if (trainFeat.X[0].length !== testFeat.X[0].length) {
+        throw new Error("Feature size mismatch between train and test after preprocessing.");
       }
+
+      state.prep = { ...prep, featureNames: trainFeat.featureNames, addFamilySize, addIsAlone };
+      state.testIds = testFeat.ids;
+
+      featSizeEl.textContent = String(trainFeat.X[0].length);
+
+      // Stratified split (80/20)
+      const { Xtrain, ytrain, Xval, yval } = stratifiedSplit(trainFeat.X, trainFeat.y, 0.2);
+
+      // Store tensors later (we keep arrays until training to avoid memory pressure)
+      state.Xtrain = Xtrain;
+      state.ytrain = ytrain;
+      state.Xval = Xval;
+      state.yval = yval;
+
+      setStatus(prepStatus,
+        `Preprocess ✓
+- Impute Age median=${prep.ageMedian.toFixed(3)}
+- Impute Embarked mode=${prep.embarkedMode}
+- Standardize Age/Fare
+- One-hot: Pclass(${prep.cats.pclassCats.length}), Sex(${prep.cats.sexCats.length}), Embarked(${prep.cats.embarkedCats.length})
+- Features=${trainFeat.X[0].length}
+- Split: train=${Xtrain.length}, val=${Xval.length}`
+      );
+
+      // Enable next step
+      btnBuildModel.disabled = false;
+      btnTrain.disabled = true;
+      btnEvaluate.disabled = true;
+      btnPredict.disabled = true;
+      btnDownloadSubmission.disabled = true;
+      btnDownloadProbs.disabled = true;
+      btnDownloadModel.disabled = true;
+
+      // reset downstream
+      state.model = null;
+      state.valProbs = state.valPreds = null;
+      state.testProbs = state.testPreds = null;
+      clearVis();
+
+      // Show feature names in console for debugging
+      console.log("Feature order:", state.prep.featureNames);
+
+    } catch (err) {
+      console.error(err);
+      setStatus(prepStatus, `Preprocess: error — ${err.message}`);
+      warn(`Preprocessing error:\n${err.message}`);
     }
-    shuffle(idx0);
-    shuffle(idx1);
+  }
 
-    const nVal0 = Math.floor(idx0.length * valFrac);
-    const nVal1 = Math.floor(idx1.length * valFrac);
+  function stratifiedSplit(X, y, valFrac = 0.2) {
+    const pos = [];
+    const neg = [];
+    for (let i = 0; i < y.length; i++) {
+      (y[i] === 1 ? pos : neg).push(i);
+    }
 
-    const valIdx = idx0.slice(0, nVal0).concat(idx1.slice(0, nVal1));
-    const trainIdx = idx0.slice(nVal0).concat(idx1.slice(nVal1));
+    shuffleInPlace(pos);
+    shuffleInPlace(neg);
 
-    // shuffle combined (not necessary but nice)
-    shuffle(valIdx);
-    shuffle(trainIdx);
+    const posValN = Math.max(1, Math.floor(pos.length * valFrac));
+    const negValN = Math.max(1, Math.floor(neg.length * valFrac));
+
+    const valIdx = pos.slice(0, posValN).concat(neg.slice(0, negValN));
+    const trainIdx = pos.slice(posValN).concat(neg.slice(negValN));
+
+    shuffleInPlace(valIdx);
+    shuffleInPlace(trainIdx);
 
     const Xtrain = trainIdx.map((i) => X[i]);
     const ytrain = trainIdx.map((i) => y[i]);
@@ -719,550 +590,418 @@
     return { Xtrain, ytrain, Xval, yval };
   }
 
-  async function runPreprocessing() {
-    if (!state.raw.trainRows || !state.raw.testRows) {
-      alertUser("Load data first.");
+  function shuffleInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  }
+
+  // -------------------------
+  // Model
+  // -------------------------
+  function buildModel() {
+    if (!state.prep || !state.Xtrain) {
+      warn("Preprocess data first.");
       return;
     }
 
-    setPill(el.prepPill, "Preprocess", "running…");
+    const inputDim = state.Xtrain[0].length;
 
-    const useFamily = el.toggleFamily.checked;
-    const useAlone = el.toggleAlone.checked;
-
-    const params = fitPreprocessParams(state.raw.trainRows);
-
-    // Build matrices
-    const train = preprocessRows(state.raw.trainRows, params, {
-      useFamily,
-      useAlone,
-      includeTarget: true,
-    });
-    const test = preprocessRows(state.raw.testRows, params, {
-      useFamily,
-      useAlone,
-      includeTarget: false,
-    });
-
-    // Stratified split
-    const split = stratifiedSplit(train.X, train.y, 0.2, 42);
-
-    // Dispose old tensors if any
-    disposeTensors();
-
-    state.prep = {
-      ...state.prep,
-      ...params,
-      featureNames: train.featureNames,
-      summary: {
-        schema: SCHEMA,
-        engineered: { FamilySize: useFamily, IsAlone: useAlone },
-        imputation: { Age_median: params.ageMedian, Embarked_mode: params.embarkedMode },
-        standardization: {
-          Age: { mean: params.ageMean, std: params.ageStd },
-          Fare: { mean: params.fareMean, std: params.fareStd },
-        },
-        onehot: params.cats,
-        featureNames: train.featureNames,
-      },
-    };
-
-    // Tensors
-    state.tensors.xTrain = toTensor2D(split.Xtrain);
-    state.tensors.yTrain = toTensor1D(split.ytrain);
-    state.tensors.xVal = toTensor2D(split.Xval);
-    state.tensors.yVal = toTensor1D(split.yval);
-
-    state.tensors.xTest = toTensor2D(test.X);
-    state.tensors.testPassengerIds = test.ids;
-
-    // Log
-    const logLines = [];
-    logLines.push(`Features (after preprocessing): ${train.featureNames.length}`);
-    logLines.push(train.featureNames.join(", "));
-    logLines.push("");
-    logLines.push(`Train X shape: [${split.Xtrain.length}, ${train.featureNames.length}]`);
-    logLines.push(`Train y shape: [${split.ytrain.length}]`);
-    logLines.push(`Val   X shape: [${split.Xval.length}, ${train.featureNames.length}]`);
-    logLines.push(`Val   y shape: [${split.yval.length}]`);
-    logLines.push(`Test  X shape: [${test.X.length}, ${train.featureNames.length}]`);
-    el.prepLog.textContent = logLines.join("\n");
-
-    setPill(el.prepPill, "Preprocess", "done ✅");
-  }
-
-  function disposeTensors() {
-    for (const k of Object.keys(state.tensors)) {
-      const t = state.tensors[k];
-      if (t && typeof t.dispose === "function") t.dispose();
-      state.tensors[k] = null;
-    }
-    state.tensors.testPassengerIds = null;
-  }
-
-  // ----------------------------
-  // Model
-  // ----------------------------
-  function buildModel(inputDim) {
-    // (HW2 Task 4) Add Sigmoid gate to interpret feature importance.
-    // Functional API: Input -> SigmoidGate -> Dense(16,relu) -> Dense(1,sigmoid)
-    const input = tf.input({ shape: [inputDim], name: "features" });
-    const gated = new SigmoidGate({ name: "sigmoid_gate" }).apply(input);
-    const hidden = tf.layers.dense({ units: 16, activation: "relu", name: "hidden" }).apply(gated);
-    const output = tf.layers.dense({ units: 1, activation: "sigmoid", name: "output" }).apply(hidden);
-
-    const model = tf.model({
-      inputs: input,
-      outputs: output,
-      name: "titanic_shallow_with_gate",
-    });
+    const model = tf.sequential();
+    model.add(tf.layers.dense({ units: 16, activation: "relu", inputShape: [inputDim] })); // single hidden layer
+    model.add(tf.layers.dense({ units: 1, activation: "sigmoid" }));
 
     model.compile({
       optimizer: tf.train.adam(),
       loss: "binaryCrossentropy",
-      metrics: ["accuracy"],
+      metrics: ["accuracy"]
     });
 
-    return model;
-  }
+    state.model = model;
 
-  function captureModelSummary(model) {
+    // Show summary
     const lines = [];
-    model.summary(120, undefined, (line) => lines.push(line));
-    return lines.join("\n");
+    model.summary(80, undefined, (line) => lines.push(line));
+    setStatus(modelStatus, "Model built ✓\n" + lines.join("\n"));
+
+    btnTrain.disabled = false;
+    btnDownloadModel.disabled = false;
   }
 
-  function onBuildModel() {
-    if (!state.tensors.xTrain) {
-      alertUser("Run preprocessing first.");
-      return;
-    }
-    const inputDim = state.tensors.xTrain.shape[1];
-    state.model = buildModel(inputDim);
-    el.modelSummary.textContent = captureModelSummary(state.model);
-    setPill(el.modelPill, "Model", `built ✅ (inputDim=${inputDim})`);
-  }
-
-  async function onSaveModel() {
+  // -------------------------
+  // Training (tfjs-vis + early stopping)
+  // -------------------------
+  async function train() {
     if (!state.model) {
-      alertUser("Build/train a model first.");
+      warn("Build the model first.");
       return;
     }
-    try {
-      await state.model.save("downloads://titanic-tfjs");
-      setPill(el.modelPill, "Model", "saved ✅");
-    } catch (e) {
-      console.error(e);
-      alertUser("Model save failed. Check console.");
-    }
-  }
 
-  // ----------------------------
-  // Training (with early stopping)
-  // ----------------------------
-  function earlyStopping(patience = 5) {
-    let best = Infinity;
+    state.stopRequested = false;
+    btnTrain.disabled = true;
+    btnStop.disabled = false;
+    btnEvaluate.disabled = true;
+    btnPredict.disabled = true;
+
+    setStatus(trainStatus, "Training…");
+
+    clearVis();
+    metricsBox.innerHTML = "";
+    rocBox.innerHTML = "";
+
+    const XtrainT = tf.tensor2d(state.Xtrain);
+    const ytrainT = tf.tensor2d(state.ytrain, [state.ytrain.length, 1]);
+    const XvalT = tf.tensor2d(state.Xval);
+    const yvalT = tf.tensor2d(state.yval, [state.yval.length, 1]);
+
+    const surface = { name: "Training", tab: "Fit" };
+    visFit.innerHTML = ""; // ensure empty
+    tfvis.visor().open();
+
+    // Early stopping on val_loss
+    const patience = 5;
+    let best = Number.POSITIVE_INFINITY;
     let wait = 0;
-    let bestWeights = null;
 
-    return {
-      onEpochEnd: async (epoch, logs) => {
-        const valLoss = logs?.val_loss;
-        if (typeof valLoss !== "number") return;
+    const callbacks = [
+      tfvis.show.fitCallbacks(
+        { name: "Loss & Accuracy", tab: "Fit", styles: { height: "260px" } },
+        ["loss", "val_loss", "acc", "val_acc"],
+        { callbacks: ["onEpochEnd"] }
+      ),
+      {
+        onEpochEnd: async (epoch, logs) => {
+          const valLoss = logs.val_loss;
+          if (valLoss + 1e-6 < best) {
+            best = valLoss;
+            wait = 0;
+          } else {
+            wait += 1;
+          }
 
-        if (valLoss < best - 1e-6) {
-          best = valLoss;
-          wait = 0;
-          // clone weights
-          bestWeights = state.model.getWeights().map((w) => w.clone());
-        } else {
-          wait++;
           if (wait >= patience) {
-            // restore best weights and stop
-            if (bestWeights) state.model.setWeights(bestWeights);
             state.model.stopTraining = true;
           }
-        }
-      },
-      onTrainEnd: async () => {
-        // dispose best weights clones
-        if (bestWeights) bestWeights.forEach((w) => w.dispose());
-      },
-    };
-  }
+          if (state.stopRequested) {
+            state.model.stopTraining = true;
+          }
 
-  async function onTrain() {
-    if (!state.model) {
-      alertUser("Build model first.");
-      return;
-    }
-    if (!state.tensors.xTrain || !state.tensors.yTrain) {
-      alertUser("Run preprocessing first.");
-      return;
-    }
-
-    setPill(el.trainPill, "Train", "training…");
-
-    // Clear vis containers
-    el.visFit.innerHTML = "";
-    el.visHistory.innerHTML = "";
-
-    // tfjs-vis fit callbacks
-    const fitCallbacks = tfvis.show.fitCallbacks(el.visFit, ["loss", "acc", "val_loss", "val_acc"], {
-      callbacks: ["onEpochEnd"],
-    });
-
-    const es = earlyStopping(5);
-
-    await state.model.fit(state.tensors.xTrain, state.tensors.yTrain, {
-      epochs: 50,
-      batchSize: 32,
-      validationData: [state.tensors.xVal, state.tensors.yVal],
-      callbacks: {
-        onEpochEnd: async (epoch, logs) => {
-          await fitCallbacks.onEpochEnd(epoch, logs);
-          await es.onEpochEnd(epoch, logs);
-          setPill(
-            el.trainPill,
-            "Train",
-            `epoch ${epoch + 1}/50 loss=${logs.loss.toFixed(4)} val_loss=${logs.val_loss.toFixed(4)}`
+          setStatus(trainStatus,
+            `Epoch ${epoch + 1} — loss=${logs.loss.toFixed(4)}, acc=${(logs.acc ?? logs.accuracy).toFixed(4)}, ` +
+            `val_loss=${logs.val_loss.toFixed(4)}, val_acc=${(logs.val_acc ?? logs.val_accuracy).toFixed(4)}`
           );
-        },
-        onTrainEnd: async (logs) => {
-          await es.onTrainEnd(logs);
-        },
-      },
-    });
-
-    // After training, render feature importance from the sigmoid gate (HW2 Task 4).
-    renderGateImportance();
-
-    setPill(el.trainPill, "Train", "done ✅");
-  }
-
-  // ----------------------------
-  // Metrics: ROC/AUC + threshold slider -> confusion matrix + PRF1
-  // ----------------------------
-  async function computeValProbsAndLabels() {
-    const probsT = state.model.predict(state.tensors.xVal);
-    const probs = await probsT.data();
-    probsT.dispose();
-
-    const labels = await state.tensors.yVal.data(); // float32 0/1
-    const y = new Int32Array(labels.length);
-    for (let i = 0; i < labels.length; i++) y[i] = labels[i] >= 0.5 ? 1 : 0;
-
-    return { probs: Float32Array.from(probs), labels: y };
-  }
-
-  function rocCurve(labels, probs, steps = 101) {
-    const tpr = [];
-    const fpr = [];
-    for (let i = 0; i < steps; i++) {
-      const thr = i / (steps - 1);
-      let tp = 0,
-        fp = 0,
-        tn = 0,
-        fn = 0;
-      for (let j = 0; j < labels.length; j++) {
-        const pred = probs[j] >= thr ? 1 : 0;
-        const y = labels[j];
-        if (y === 1 && pred === 1) tp++;
-        if (y === 0 && pred === 1) fp++;
-        if (y === 0 && pred === 0) tn++;
-        if (y === 1 && pred === 0) fn++;
+        }
       }
-      const tprVal = tp + fn ? tp / (tp + fn) : 0;
-      const fprVal = fp + tn ? fp / (fp + tn) : 0;
-      tpr.push(tprVal);
-      fpr.push(fprVal);
-    }
-    return { fpr, tpr };
-  }
-
-  function aucFromRoc(fpr, tpr) {
-    // Trapezoidal rule, assuming fpr increasing with threshold direction (it will be)
-    let auc = 0;
-    for (let i = 1; i < fpr.length; i++) {
-      const dx = fpr[i] - fpr[i - 1];
-      const yAvg = (tpr[i] + tpr[i - 1]) / 2;
-      auc += dx * yAvg;
-    }
-    return Math.abs(auc);
-  }
-
-  function confusionAndPRF1(labels, probs, threshold) {
-    let tp = 0,
-      fp = 0,
-      tn = 0,
-      fn = 0;
-    for (let i = 0; i < labels.length; i++) {
-      const pred = probs[i] >= threshold ? 1 : 0;
-      const y = labels[i];
-      if (y === 1 && pred === 1) tp++;
-      if (y === 0 && pred === 1) fp++;
-      if (y === 0 && pred === 0) tn++;
-      if (y === 1 && pred === 0) fn++;
-    }
-    const acc = (tp + tn) / Math.max(1, tp + tn + fp + fn);
-    const precision = tp / Math.max(1, tp + fp);
-    const recall = tp / Math.max(1, tp + fn);
-    const f1 = (2 * precision * recall) / Math.max(1e-12, precision + recall);
-    return { tp, fp, tn, fn, acc, precision, recall, f1 };
-  }
-
-  function renderMetricsTable(m) {
-    const thead = el.metricsTable.querySelector("thead");
-    const tbody = el.metricsTable.querySelector("tbody");
-    thead.innerHTML = "";
-    tbody.innerHTML = "";
-
-    // Confusion matrix section
-    const trh = document.createElement("tr");
-    ["", "Pred 1", "Pred 0"].forEach((h) => {
-      const th = document.createElement("th");
-      th.textContent = h;
-      trh.appendChild(th);
-    });
-    thead.appendChild(trh);
-
-    const row1 = document.createElement("tr");
-    row1.appendChild(td("Actual 1"));
-    row1.appendChild(td(String(m.tp)));
-    row1.appendChild(td(String(m.fn)));
-    tbody.appendChild(row1);
-
-    const row0 = document.createElement("tr");
-    row0.appendChild(td("Actual 0"));
-    row0.appendChild(td(String(m.fp)));
-    row0.appendChild(td(String(m.tn)));
-    tbody.appendChild(row0);
-
-    // Spacer
-    const spacer = document.createElement("tr");
-    spacer.appendChild(td("—"));
-    spacer.appendChild(td("—"));
-    spacer.appendChild(td("—"));
-    tbody.appendChild(spacer);
-
-    // Metrics
-    const metrics = [
-      ["Accuracy", m.acc],
-      ["Precision", m.precision],
-      ["Recall", m.recall],
-      ["F1", m.f1],
     ];
-    for (const [name, val] of metrics) {
-      const tr = document.createElement("tr");
-      tr.appendChild(td(name));
-      tr.appendChild(td(val.toFixed(4)));
-      tr.appendChild(td(""));
-      tbody.appendChild(tr);
-    }
 
-    function td(text) {
-      const cell = document.createElement("td");
-      cell.textContent = text;
-      return cell;
+    try {
+      await state.model.fit(XtrainT, ytrainT, {
+        epochs: 50,
+        batchSize: 32,
+        shuffle: true,
+        validationData: [XvalT, yvalT],
+        callbacks
+      });
+
+      setStatus(trainStatus, `Training completed ✓ (best val_loss=${best.toFixed(4)})`);
+
+      // After training, compute validation probabilities once (used for ROC + threshold slider)
+      const probs = state.model.predict(XvalT);
+      const probArr = Array.from((await probs.data()));
+      state.valProbs = probArr;
+      state.valPreds = null; // computed at threshold when needed
+
+      btnEvaluate.disabled = false;
+      btnPredict.disabled = false;
+
+    } catch (err) {
+      console.error(err);
+      setStatus(trainStatus, `Training error — ${err.message}`);
+      warn(`Training error:\n${err.message}`);
+    } finally {
+      btnTrain.disabled = false;
+      btnStop.disabled = true;
+      tf.dispose([XtrainT, ytrainT, XvalT, yvalT]);
     }
   }
 
-  function renderROC(fpr, tpr) {
-    el.visROC.innerHTML = "";
-    const points = fpr.map((x, i) => ({ x, y: tpr[i] }));
+  // -------------------------
+  // Metrics: ROC/AUC + threshold slider + confusion matrix
+  // -------------------------
+  function computeRocAuc(yTrue, yProb) {
+    // Build ROC points by sorting by probability desc.
+    const pairs = yProb.map((p, i) => ({ p, y: yTrue[i] }));
+    pairs.sort((a, b) => b.p - a.p);
+
+    const P = yTrue.reduce((s, v) => s + (v === 1 ? 1 : 0), 0);
+    const N = yTrue.length - P;
+
+    let tp = 0, fp = 0;
+    let prevP = Infinity;
+
+    const points = [{ fpr: 0, tpr: 0 }];
+    for (const item of pairs) {
+      if (item.p !== prevP) {
+        points.push({ fpr: N ? fp / N : 0, tpr: P ? tp / P : 0 });
+        prevP = item.p;
+      }
+      if (item.y === 1) tp++; else fp++;
+    }
+    points.push({ fpr: 1, tpr: 1 });
+
+    // AUC via trapezoidal rule over FPR
+    let auc = 0;
+    for (let i = 1; i < points.length; i++) {
+      const x1 = points[i - 1].fpr, y1 = points[i - 1].tpr;
+      const x2 = points[i].fpr, y2 = points[i].tpr;
+      auc += (x2 - x1) * (y1 + y2) / 2;
+    }
+
+    return { points, auc };
+  }
+
+  function confusionAndMetrics(yTrue, yProb, thr) {
+    let tp = 0, tn = 0, fp = 0, fn = 0;
+    for (let i = 0; i < yTrue.length; i++) {
+      const pred = yProb[i] >= thr ? 1 : 0;
+      const y = yTrue[i];
+      if (pred === 1 && y === 1) tp++;
+      else if (pred === 1 && y === 0) fp++;
+      else if (pred === 0 && y === 0) tn++;
+      else fn++;
+    }
+    const acc = (tp + tn) / (tp + tn + fp + fn);
+    const prec = tp + fp === 0 ? 0 : tp / (tp + fp);
+    const rec = tp + fn === 0 ? 0 : tp / (tp + fn);
+    const f1 = (prec + rec) === 0 ? 0 : (2 * prec * rec) / (prec + rec);
+    return { tp, tn, fp, fn, acc, prec, rec, f1 };
+  }
+
+  function renderConfusion(m) {
+    // Simple HTML table + KPI
+    metricsBox.innerHTML = `
+      <div style="display:grid; gap:10px">
+        <table>
+          <thead>
+            <tr><th></th><th>Predicted 1</th><th>Predicted 0</th></tr>
+          </thead>
+          <tbody>
+            <tr><th>Actual 1</th><td>${m.tp}</td><td>${m.fn}</td></tr>
+            <tr><th>Actual 0</th><td>${m.fp}</td><td>${m.tn}</td></tr>
+          </tbody>
+        </table>
+        <div class="kpi">
+          <div class="box"><div class="muted">Accuracy</div><div class="num">${(m.acc * 100).toFixed(2)}%</div></div>
+          <div class="box"><div class="muted">Precision</div><div class="num">${m.prec.toFixed(3)}</div></div>
+          <div class="box"><div class="muted">Recall</div><div class="num">${m.rec.toFixed(3)}</div></div>
+          <div class="box"><div class="muted">F1</div><div class="num">${m.f1.toFixed(3)}</div></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRoc(points, auc) {
+    rocBox.innerHTML = "";
+    const data = points.map((pt) => ({ x: pt.fpr, y: pt.tpr }));
+
     tfvis.render.linechart(
-      el.visROC,
-      { values: [points], series: ["ROC"] },
-      { title: "ROC Curve (validation)", xLabel: "FPR", yLabel: "TPR", width: 520, height: 360 }
+      rocBox,
+      { values: [data], series: ["ROC"] },
+      {
+        title: `ROC Curve (AUC = ${auc.toFixed(4)})`,
+        xLabel: "False Positive Rate",
+        yLabel: "True Positive Rate",
+        height: 260
+      }
     );
   }
 
-  async function onEvaluate() {
-    if (!state.model || !state.tensors.xVal) {
-      alertUser("Train a model first.");
+  function evaluate() {
+    if (!state.valProbs || !state.yval) {
+      warn("Train the model first to compute validation probabilities.");
       return;
     }
+    const thr = clamp01(Number(thresholdEl.value));
+    thrLabelEl.textContent = thr.toFixed(2);
 
-    setPill(el.trainPill, "Train", "evaluating…");
+    const { points, auc } = computeRocAuc(state.yval, state.valProbs);
+    renderRoc(points, auc);
 
-    const { probs, labels } = await computeValProbsAndLabels();
-    state.eval.valProbs = probs;
-    state.eval.valLabels = labels;
+    const m = confusionAndMetrics(state.yval, state.valProbs, thr);
+    renderConfusion(m);
 
-    const roc = rocCurve(labels, probs, 101);
-    const auc = aucFromRoc(roc.fpr, roc.tpr);
-
-    state.eval.roc = roc;
-    state.eval.auc = auc;
-
-    setPill(el.aucPill, "AUC", auc.toFixed(4));
-    renderROC(roc.fpr, roc.tpr);
-
-    // Render metrics at current threshold
-    const thr = Number(el.thresholdSlider.value);
-    state.pred.threshold = thr;
-    const m = confusionAndPRF1(labels, probs, thr);
-    renderMetricsTable(m);
-
-    // Also show gate importance here (useful if user presses Evaluate after training).
-    renderGateImportance();
-
-    setPill(el.trainPill, "Train", "evaluation ready ✅");
+    setStatus(evalStatus, `Evaluation ✓ (AUC=${auc.toFixed(4)}) at threshold=${thr.toFixed(2)}`);
   }
 
-  function onThresholdChange() {
-    const thr = Number(el.thresholdSlider.value);
-    state.pred.threshold = thr;
-    el.thresholdLabel.textContent = thr.toFixed(2);
-
-    if (!state.eval.valProbs || !state.eval.valLabels) return;
-    const m = confusionAndPRF1(state.eval.valLabels, state.eval.valProbs, thr);
-    renderMetricsTable(m);
-  }
-
-  // ----------------------------
+  // -------------------------
   // Prediction + Export
-  // ----------------------------
-  async function onPredictTest() {
-    if (!state.model || !state.tensors.xTest) {
-      alertUser("Need preprocessing + trained model before prediction.");
+  // -------------------------
+  async function predictOnTest() {
+    if (!state.model || !state.prep || !state.rawTest) {
+      warn("Load data, preprocess, and train (or at least build) the model first.");
       return;
     }
-    setPill(el.predPill, "Predict", "predicting…");
+
     try {
-      const probsT = state.model.predict(state.tensors.xTest);
-      const probs = await probsT.data();
-      probsT.dispose();
-      state.pred.testProbs = Float32Array.from(probs);
-      setPill(el.predPill, "Predict", `done ✅ (n=${state.pred.testProbs.length})`);
-    } catch (e) {
-      console.error(e);
-      alertUser("Prediction failed. Check console.");
-      setPill(el.predPill, "Predict", "failed");
+      setStatus(predStatus, "Predicting on test.csv…");
+
+      const addFamilySize = state.prep.addFamilySize;
+      const addIsAlone = state.prep.addIsAlone;
+
+      const testFeat = featurizeRows(state.rawTest, state.prep, {
+        addFamilySize,
+        addIsAlone,
+        includeTarget: false
+      });
+
+      const XtestT = tf.tensor2d(testFeat.X);
+      const probsT = state.model.predict(XtestT);
+      const probs = Array.from(await probsT.data());
+
+      state.testProbs = probs;
+
+      const thr = clamp01(Number(thresholdEl.value));
+      state.testPreds = probs.map((p) => (p >= thr ? 1 : 0));
+
+      tf.dispose([XtestT, probsT]);
+
+      setStatus(predStatus, `Predict ✓ (n=${probs.length}) using threshold=${thr.toFixed(2)}`);
+
+      btnDownloadSubmission.disabled = false;
+      btnDownloadProbs.disabled = false;
+
+    } catch (err) {
+      console.error(err);
+      setStatus(predStatus, `Predict: error — ${err.message}`);
+      warn(`Prediction error:\n${err.message}`);
     }
   }
 
-  function toCSV(rows, header) {
-    const lines = [];
-    lines.push(header.join(","));
-    for (const r of rows) {
-      lines.push(header.map((h) => r[h]).join(","));
-    }
-    return lines.join("\n");
-  }
-
-  function downloadBlob(filename, blob) {
-    const url = URL.createObjectURL(blob);
+  function downloadCSV(filename, rows) {
+    const header = Object.keys(rows[0] || {});
+    const esc = (v) => {
+      const s = String(v ?? "");
+      // CSV escaping: wrap if contains comma/quote/newline
+      if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const lines = [
+      header.join(","),
+      ...rows.map((r) => header.map((h) => esc(r[h])).join(","))
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
-    a.href = url;
+    a.href = URL.createObjectURL(blob);
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
   }
 
-  function onExportSubmission() {
-    if (!state.pred.testProbs || !state.tensors.testPassengerIds) {
-      alertUser("Run Predict Test first.");
+  function exportSubmission() {
+    if (!state.testPreds || !state.testIds) {
+      warn("Run prediction first.");
       return;
     }
-    const thr = state.pred.threshold;
-    const rows = [];
-    for (let i = 0; i < state.pred.testProbs.length; i++) {
-      rows.push({
-        PassengerId: state.tensors.testPassengerIds[i],
-        Survived: state.pred.testProbs[i] >= thr ? 1 : 0,
-      });
-    }
-    const csv = toCSV(rows, ["PassengerId", "Survived"]);
-    downloadBlob("submission.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    setPill(el.exportPill, "Export", "submission.csv downloaded ✅");
+    const rows = state.testIds.map((id, i) => ({
+      PassengerId: id,
+      Survived: state.testPreds[i]
+    }));
+    downloadCSV("submission.csv", rows);
+    setStatus(exportStatus, "Export ✓ downloaded submission.csv");
   }
 
-  function onExportProbs() {
-    if (!state.pred.testProbs || !state.tensors.testPassengerIds) {
-      alertUser("Run Predict Test first.");
+  function exportProbabilities() {
+    if (!state.testProbs || !state.testIds) {
+      warn("Run prediction first.");
       return;
     }
-    const rows = [];
-    for (let i = 0; i < state.pred.testProbs.length; i++) {
-      rows.push({
-        PassengerId: state.tensors.testPassengerIds[i],
-        Probability: Number(state.pred.testProbs[i]).toFixed(6),
-      });
-    }
-    const csv = toCSV(rows, ["PassengerId", "Probability"]);
-    downloadBlob("probabilities.csv", new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    setPill(el.exportPill, "Export", "probabilities.csv downloaded ✅");
+    const rows = state.testIds.map((id, i) => ({
+      PassengerId: id,
+      Survived_Prob: state.testProbs[i]
+    }));
+    downloadCSV("probabilities.csv", rows);
+    setStatus(exportStatus, "Export ✓ downloaded probabilities.csv");
   }
 
-  function onExportDebug() {
-    if (!state.prep.summary) {
-      alertUser("Run preprocessing first.");
+  async function saveModel() {
+    if (!state.model) {
+      warn("Build a model first.");
       return;
     }
-    const json = JSON.stringify(state.prep.summary, null, 2);
-    downloadBlob(
-      "preprocessing_summary.json",
-      new Blob([json], { type: "application/json;charset=utf-8" })
-    );
-    setPill(el.exportPill, "Export", "preprocessing_summary.json downloaded ✅");
+    try {
+      setStatus(exportStatus, "Saving model…");
+      await state.model.save("downloads://titanic-tfjs");
+      setStatus(exportStatus, "Model saved ✓ (downloads://titanic-tfjs)");
+    } catch (err) {
+      console.error(err);
+      setStatus(exportStatus, `Model save error — ${err.message}`);
+      warn(`Model save error:\n${err.message}`);
+    }
   }
 
-  // ----------------------------
-  // Button wiring
-  // ----------------------------
-  async function onLoadInspect() {
-    const loaded = await loadFromFileInputs();
-    if (!loaded) return;
+  // -------------------------
+  // Event wiring
+  // -------------------------
+  btnAutoLoad.addEventListener("click", () => loadData({ preferUploads: true }));
+  btnClear.addEventListener("click", () => {
+    // Reset everything
+    trainFileEl.value = "";
+    testFileEl.value = "";
+    state.rawTrain = null;
+    state.rawTest = null;
+    resetPipelineFrom("prep");
+    previewTableEl.innerHTML = "";
+    visCharts.innerHTML = "";
+    trainShapeEl.textContent = "—";
+    testShapeEl.textContent = "—";
+    missingTop3El.textContent = "—";
+    featSizeEl.textContent = "—";
+    clearVis();
+    setStatus(loadStatus, "Status: cleared. Click Auto-load or upload files.");
+    setStatus(prepStatus, "Not preprocessed yet.");
+    setStatus(modelStatus, "Model: not built.");
+    setStatus(trainStatus, "Train: idle.");
+    setStatus(evalStatus, "Evaluate: idle.");
+    setStatus(predStatus, "Predict: idle.");
+    setStatus(exportStatus, "Export: idle.");
+    btnPreprocess.disabled = true;
+    btnBuildModel.disabled = true;
+    btnTrain.disabled = true;
+    btnStop.disabled = true;
+    btnEvaluate.disabled = true;
+    btnPredict.disabled = true;
+    btnDownloadSubmission.disabled = true;
+    btnDownloadProbs.disabled = true;
+    btnDownloadModel.disabled = true;
+  });
 
-    const { trainRows, testRows } = loaded;
+  btnPreprocess.addEventListener("click", preprocess);
+  btnBuildModel.addEventListener("click", buildModel);
+  btnTrain.addEventListener("click", train);
+  btnStop.addEventListener("click", () => {
+    state.stopRequested = true;
+    setStatus(trainStatus, "Stop requested… finishing current epoch.");
+  });
 
-    // KPIs + preview + missing
-    renderKPIs(trainRows, testRows);
-    renderPreviewTable(trainRows, 10);
+  btnEvaluate.addEventListener("click", evaluate);
+  thresholdEl.addEventListener("input", () => {
+    const thr = clamp01(Number(thresholdEl.value));
+    thrLabelEl.textContent = thr.toFixed(2);
+    // Live-update confusion matrix if we already have val probs
+    if (state.valProbs && state.yval) {
+      const m = confusionAndMetrics(state.yval, state.valProbs, thr);
+      renderConfusion(m);
+    }
+  });
 
-    // Quick EDA charts
-    el.visEDA.innerHTML = "";
-    renderQuickEDA(trainRows);
+  btnPredict.addEventListener("click", predictOnTest);
+  btnDownloadSubmission.addEventListener("click", exportSubmission);
+  btnDownloadProbs.addEventListener("click", exportProbabilities);
+  btnDownloadModel.addEventListener("click", saveModel);
 
-    setPill(el.statusPill, "Status", "inspect ready ✅");
-  }
-
-  function init() {
-    // Default UI states
-    setPill(el.statusPill, "Status", "waiting for files");
-    setPill(el.prepPill, "Preprocess", "idle");
-    setPill(el.modelPill, "Model", "not built");
-    setPill(el.trainPill, "Train", "idle");
-    setPill(el.aucPill, "AUC", "—");
-    setPill(el.predPill, "Predict", "idle");
-    setPill(el.exportPill, "Export", "idle");
-    el.thresholdLabel.textContent = Number(el.thresholdSlider.value).toFixed(2);
-
-    el.btnLoad.addEventListener("click", onLoadInspect);
-    el.btnPreprocess.addEventListener("click", runPreprocessing);
-    el.btnBuildModel.addEventListener("click", onBuildModel);
-    el.btnSaveModel.addEventListener("click", onSaveModel);
-    el.btnTrain.addEventListener("click", onTrain);
-    el.btnEvaluate.addEventListener("click", onEvaluate);
-
-    el.thresholdSlider.addEventListener("input", onThresholdChange);
-
-    el.btnPredict.addEventListener("click", onPredictTest);
-    el.btnExportSubmission.addEventListener("click", onExportSubmission);
-    el.btnExportProbs.addEventListener("click", onExportProbs);
-    el.btnExportDebug.addEventListener("click", onExportDebug);
-
-    // Helpful status updates when files selected
-    const maybe = () => {
-      const ok = !!el.trainFile.files?.[0] && !!el.testFile.files?.[0];
-      setPill(el.statusPill, "Status", ok ? "files selected — click Load & Inspect" : "waiting for files");
-    };
-    el.trainFile.addEventListener("change", maybe);
-    el.testFile.addEventListener("change", maybe);
-  }
-
-  init();
+  // Optional: auto-load on page open (repo defaults) without requiring user clicks.
+  // If you DON'T want auto-load on page load, comment the next line.
+  window.addEventListener("load", () => loadData({ preferUploads: true }));
 })();
