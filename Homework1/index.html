@@ -215,12 +215,10 @@
 
 <body>
   <header>
-    <h1>Titanic EDA — browser-only (repo auto-load + upload fallback)</h1>
+    <h1>Titanic EDA — browser-only (train.csv + test.csv → merged)</h1>
     <p>
       Client-side CSV parsing via PapaParse + charts via Chart.js. No server, no build tools, GitHub Pages friendly.
-      <span class="muted">
-        Auto-loads <b>Homework1/train.csv</b> and <b>Homework1/test.csv</b> from this repo (manual upload still supported).
-      </span>
+      <span class="muted">Upload Kaggle <b>train.csv</b> and <b>test.csv</b>, then run EDA.</span>
     </p>
   </header>
 
@@ -368,4 +366,47 @@
 
       <div class="hr"></div>
 
-      <div class="gr
+      <div class="grid cols-2">
+        <div class="canvas-wrap">
+          <div class="muted" style="margin: 0 0 8px;">Age histogram (merged)</div>
+          <canvas id="ageHist"></canvas>
+        </div>
+        <div class="canvas-wrap">
+          <div class="muted" style="margin: 0 0 8px;">Fare histogram (merged)</div>
+          <canvas id="fareHist"></canvas>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="canvas-wrap">
+        <div class="muted" style="margin: 0 0 8px;">Correlation “heatmap” (bubble matrix) — numeric features (train only)</div>
+        <canvas id="corrHeatmap"></canvas>
+      </div>
+
+      <div class="note">
+        Correlations use train rows (because Survived only exists there). Bubble size = |corr|, color = sign and magnitude.
+      </div>
+    </section>
+
+    <section>
+      <h2>Export</h2>
+      <div class="row">
+        <button id="btnExportCSV">Download merged CSV</button>
+        <button id="btnExportJSON" class="secondary">Download JSON summary</button>
+        <span class="pill" id="exportStatus"><b>Export:</b> idle</span>
+      </div>
+      <div class="note muted">
+        Exports are generated in-browser: merged dataset → CSV, plus an EDA summary → JSON (shape, missingness, stats).
+      </div>
+    </section>
+  </main>
+
+  <div class="footer-note">
+    <b>Reusable note:</b> This app is structured so you can swap datasets that come as “train/test splits”.
+    Update the schema in <b>app.js</b> (target/features/identifier) and keep the same load/merge/EDA pipeline.
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
