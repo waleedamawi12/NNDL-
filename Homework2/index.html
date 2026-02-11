@@ -1,4 +1,4 @@
-<!-- index.html -->
+<!-- index.html (fixed layout: vertical/stacked, not side-by-side wide) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,15 +30,16 @@
     header .title{display:flex; gap:10px; align-items:baseline; flex-wrap:wrap}
     header h1{margin:0; font-size:18px; letter-spacing:.2px}
     header .subtitle{color:var(--muted); font-size:13px}
+
     main{max-width:1180px; margin:0 auto; padding:16px; display:grid; gap:12px}
-    .grid{
-      display:grid; gap:12px;
-      grid-template-columns: 1.2fr .8fr;
+
+    /* ✅ FIX: make layout vertical/stacked by default */
+    .stack{
+      display:grid;
+      gap:12px;
+      grid-template-columns: 1fr; /* always one column */
     }
-    @media (max-width: 980px){
-      .grid{grid-template-columns: 1fr}
-      header{position:relative}
-    }
+
     .card{
       background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));
       border:1px solid var(--border);
@@ -47,7 +48,6 @@
     }
     .card h2{margin:0 0 10px; font-size:15px}
     .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
-    .row > *{flex:0 0 auto}
     .btn{
       cursor:pointer;
       border:1px solid var(--border);
@@ -64,6 +64,7 @@
     .btn.danger{background:rgba(255,107,107,.12)}
     .btn.ok{background:rgba(46,229,157,.10)}
     .btn:disabled{opacity:.5; cursor:not-allowed}
+
     .pill{
       display:inline-flex; gap:6px; align-items:center;
       font-size:12px; padding:6px 10px; border-radius:999px;
@@ -104,8 +105,17 @@
       padding:8px;
       white-space:nowrap;
     }
-    .twoCol{display:grid; grid-template-columns: 1fr 1fr; gap:12px}
-    @media (max-width: 980px){.twoCol{grid-template-columns: 1fr}}
+
+    /* Sections that were previously side-by-side now stack on small screens,
+       but can become 2-col on wide screens for readability. */
+    .twoCol{
+      display:grid; grid-template-columns: 1fr;
+      gap:12px;
+    }
+    @media (min-width: 980px){
+      .twoCol{ grid-template-columns: 1fr 1fr; }
+    }
+
     .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
     .note{
       font-size:12px; color:var(--muted); line-height:1.35;
@@ -118,8 +128,6 @@
       padding:10px; border-radius:12px; border:1px solid var(--border);
       background:rgba(0,0,0,.12); font-size:13px;
     }
-    .status .ok{color:var(--ok); font-weight:700}
-    .status .bad{color:var(--danger); font-weight:700}
     .vis{
       min-height: 140px;
       border:1px solid var(--border);
@@ -128,32 +136,6 @@
       padding:8px;
     }
     .footerNote{font-size:12px; color:var(--muted); padding:6px 2px}
-
-    /* --- tfjs-vis visor: move from right dock to bottom drawer (FIX) --- */
-    .tfjs-visor-container{
-      left:0 !important;
-      right:0 !important;
-      bottom:0 !important;
-      top:auto !important;
-
-      width:100% !important;
-      height:38vh !important;
-      max-height:420px !important;
-
-      border-left:none !important;
-      border-top:1px solid rgba(255,255,255,.18) !important;
-    }
-    .tfjs-visor{
-      width:100% !important;
-      height:100% !important;
-    }
-    body{
-      padding-bottom:40vh; /* prevent drawer covering page */
-    }
-    @media (max-width: 600px){
-      .tfjs-visor-container{height:45vh !important;}
-      body{padding-bottom:48vh;}
-    }
   </style>
 </head>
 <body>
@@ -170,14 +152,15 @@
       Create public GitHub repo, commit <span class="mono">index.html</span>/<span class="mono">app.js</span>,
       enable Pages (main/root), test URL.
       <br/>
-      This app auto-loads CSVs from:
+      Auto-loads CSVs from:
       <span class="mono">https://waleedamawi12.github.io/NNDL-/Homework1/train.csv</span> and
       <span class="mono">https://waleedamawi12.github.io/NNDL-/Homework1/test.csv</span>
       (file inputs below can override).
     </div>
 
-    <div class="grid">
-      <!-- LEFT: Main workflow -->
+    <!-- ✅ FIX: everything now flows vertically -->
+    <div class="stack">
+
       <section class="card">
         <h2>1) Data Load</h2>
         <div class="row">
@@ -261,8 +244,7 @@
         </div>
       </section>
 
-      <!-- RIGHT: Metrics / Prediction / Export -->
-      <aside class="card">
+      <section class="card">
         <h2>5) Metrics (ROC/AUC + Threshold)</h2>
         <div class="row">
           <button id="btnEval" class="btn secondary" disabled>Evaluate</button>
@@ -283,29 +265,30 @@
             <div class="mono" id="metricText">—</div>
           </div>
         </div>
+      </section>
 
-        <div class="card" style="padding:10px; margin-top:12px">
-          <h2 style="margin:0 0 8px; font-size:14px">6) Prediction</h2>
-          <div class="row">
-            <button id="btnPredict" class="btn" disabled>Predict on Test</button>
-            <span class="pill"><strong>Status</strong> <span class="muted" id="predStatus">idle</span></span>
-          </div>
-          <div class="status" style="margin-top:10px">
-            <div><strong>Download</strong></div>
-            <div class="muted">Creates Kaggle-ready <span class="mono">submission.csv</span> and <span class="mono">probabilities.csv</span>.</div>
-          </div>
+      <section class="card">
+        <h2>6) Prediction</h2>
+        <div class="row">
+          <button id="btnPredict" class="btn" disabled>Predict on Test</button>
+          <span class="pill"><strong>Status</strong> <span class="muted" id="predStatus">idle</span></span>
         </div>
+        <div class="status" style="margin-top:10px">
+          <div><strong>Download</strong></div>
+          <div class="muted">Creates Kaggle-ready <span class="mono">submission.csv</span> and <span class="mono">probabilities.csv</span>.</div>
+        </div>
+      </section>
 
-        <div class="card" style="padding:10px; margin-top:12px">
-          <h2 style="margin:0 0 8px; font-size:14px">7) Export</h2>
-          <div class="row">
-            <button id="btnExportPre" class="btn secondary" disabled>Export Preprocess JSON</button>
-          </div>
-          <div class="footerNote">
-            Tip: if something shows <span class="bad">404</span> on GitHub Pages, your file path/case is wrong or Pages is pointing to another folder/branch.
-          </div>
+      <section class="card">
+        <h2>7) Export</h2>
+        <div class="row">
+          <button id="btnExportPre" class="btn secondary" disabled>Export Preprocess JSON</button>
         </div>
-      </aside>
+        <div class="footerNote">
+          Tip: if something shows <span style="color:var(--danger); font-weight:700">404</span> on GitHub Pages, your file path/case is wrong or Pages is pointing to another folder/branch.
+        </div>
+      </section>
+
     </div>
   </main>
 
