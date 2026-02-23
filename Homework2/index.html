@@ -126,8 +126,8 @@
     .fiTable th { color:var(--muted); text-align:left; }
     .barWrap{
       width:100%;
-      background: rgba(255,255,255,.06);
-      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.18);
+      border:1px solid rgba(255,255,255,.18);
       border-radius:8px;
       height:20px;
       overflow:hidden;
@@ -139,11 +139,22 @@
       width:0%;
     }
     .barLabel{
-      position:absolute; inset:0;
-      display:flex; align-items:center; padding-left:8px;
-      font-size:12px; color:#0b1020; font-weight:800;
-      mix-blend-mode: screen;
-    }
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  padding-left:8px;
+
+  /* ✅ readable number */
+  color:#000;              /* black text */
+  font-weight:800;
+  font-size:12px;
+
+  /* ✅ ensure it stays visible on dark backgrounds */
+  mix-blend-mode: normal;  /* remove blending */
+  text-shadow: none;        /* optional: keep crisp */
+  pointer-events:none;      /* purely visual */
+}
     .fiInterpret{
       margin-top:10px;
       background: var(--goodBg);
