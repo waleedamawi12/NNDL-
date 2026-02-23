@@ -18,8 +18,6 @@
       --muted:#9fb0d0;
       --accent:#7aa2ff;
       --border:rgba(255,255,255,0.12);
-      --good:#2ee59d;
-      --bad:#ff6b6b;
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
     }
@@ -39,12 +37,12 @@
       background: linear-gradient(to bottom, rgba(255,255,255,.04), transparent);
     }
     h1{ margin:0; font-size:18px; letter-spacing:.2px; }
-    .sub{ margin:6px 0 0; color:var(--muted); font-size:13px; max-width: 1000px; }
+    .sub{ margin:6px 0 0; color:var(--muted); font-size:13px; max-width: 1100px; }
 
     main{
       padding:14px 18px 22px;
       display:grid;
-      grid-template-columns: 360px 1fr;
+      grid-template-columns: 380px 1fr;
       gap:14px;
       align-items:start;
     }
@@ -82,8 +80,7 @@
     .inline{
       display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;
     }
-    .inline > div{ flex: 1 1 120px; min-width: 120px; }
-    input[type="range"]{ width:100%; }
+    .inline > div{ flex: 1 1 140px; min-width: 140px; }
     select, input[type="number"]{
       width:100%;
       background: rgba(255,255,255,.05);
@@ -105,7 +102,7 @@
       cursor:pointer;
       transition: transform .06s ease, filter .15s ease, border-color .15s ease;
       user-select:none;
-      min-width: 160px;
+      min-width: 170px;
     }
     button:hover{ filter: brightness(1.08); border-color: rgba(122,162,255,.35); }
     button:active{ transform: translateY(1px); }
@@ -157,8 +154,10 @@
       aspect-ratio: 1 / 1;
       border-radius:12px;
       border:1px solid rgba(255,255,255,.10);
-      background: #05070b;
-      image-rendering: pixelated;
+      background:#05070b;
+
+      /* IMPORTANT: photos should look smooth, not pixelated */
+      image-rendering: auto;
     }
 
     .log{
@@ -184,9 +183,9 @@
   <header>
     <h1>Autoencoder Inpainting — Your Photo</h1>
     <p class="sub">
-      Upload a photo, then train a tiny inpainting model that learns to fill missing blocks.
-      Click on the <span class="badge">Masked Input</span> canvas to place the missing square.
-      This is the “reconstruction game” — and the loss decides what the model cares about.
+      Higher-quality inpainting needs a better “game” than plain MSE-on-everything.
+      This version defaults to <span class="badge">masked-only loss</span> + <span class="badge">L1</span> + <span class="badge">edge loss</span> + a slightly stronger U-Net.
+      Click the <span class="badge">Masked Input</span> canvas to move the missing square.
     </p>
   </header>
 
@@ -198,34 +197,34 @@
           <div class="card">
             <label>1) Upload your photo</label>
             <input id="filePhoto" type="file" accept="image/*" />
-            <p class="hint">Tip: portraits work great. The model resizes to 128×128.</p>
+            <p class="hint">The model trains on random crops of your image (more data → better fill).</p>
           </div>
 
           <div class="card">
             <div class="inline">
               <div>
                 <label>Mask size (pixels)</label>
-                <input id="maskSize" type="number" min="8" max="64" step="4" value="32" />
+                <input id="maskSize" type="number" min="12" max="96" step="4" value="48" />
               </div>
               <div>
                 <label>Train steps per frame</label>
-                <input id="spf" type="number" min="1" max="30" step="1" value="6" />
+                <input id="spf" type="number" min="1" max="30" step="1" value="8" />
               </div>
             </div>
             <div class="inline" style="margin-top:10px">
               <div>
                 <label>Learning rate</label>
                 <select id="lr">
-                  <option value="0.001">1e-3</option>
-                  <option value="0.0005" selected>5e-4</option>
-                  <option value="0.0002">2e-4</option>
+                  <option value="0.0005">5e-4</option>
+                  <option value="0.0002" selected>2e-4</option>
+                  <option value="0.0001">1e-4</option>
                 </select>
               </div>
               <div>
-                <label>Loss on masked area only</label>
+                <label>Loss region</label>
                 <select id="maskedOnly">
-                  <option value="1" selected>Yes (recommended)</option>
-                  <option value="0">No (whole image)</option>
+                  <option value="1" selected>Masked only (recommended)</option>
+                  <option value="0">Whole image (usually blurrier)</option>
                 </select>
               </div>
             </div>
@@ -240,7 +239,7 @@
               <button id="btnPredict" class="secondary">Predict Inpaint</button>
             </div>
             <p class="hint">
-              Auto-train stops on plateau / max steps. If you change mask size, rebuild the model.
+              Tip for quality: keep mask size 32–64, use masked-only loss, and train ~2–5k steps.
             </p>
           </div>
 
@@ -263,15 +262,15 @@
       <div class="grid">
         <div class="viz">
           <div class="top"><span>Original (resized)</span><span class="badge">target</span></div>
-          <canvas id="cvOrig" width="128" height="128"></canvas>
+          <canvas id="cvOrig" width="192" height="192"></canvas>
         </div>
         <div class="viz">
           <div class="top"><span>Masked Input</span><span class="badge">click to move mask</span></div>
-          <canvas id="cvMasked" width="128" height="128"></canvas>
+          <canvas id="cvMasked" width="192" height="192"></canvas>
         </div>
         <div class="viz">
           <div class="top"><span>Reconstruction (prediction)</span><span class="badge">output</span></div>
-          <canvas id="cvRecon" width="128" height="128"></canvas>
+          <canvas id="cvRecon" width="192" height="192"></canvas>
         </div>
       </div>
     </section>
