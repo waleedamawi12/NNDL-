@@ -1,15 +1,21 @@
 // app.js
 // Neural Network Design: The Gradient Puzzle (browser-only TF.js)
 //
-// Baseline idea (Level 1): pixel-wise MSE(Input, Output) => identity / copycat.
-// Level 2 idea: distribution constraint via sorted pixels => MSE(sort(Input), sort(Output))
-// Level 3 idea: add shape constraints (smoothness + direction) => emergent gradient.
+// Goal: Transform a fixed 16x16 noise image into a structured left→right gradient
+// WITHOUT target labels. The loss function is the "rule of the game".
 //
-// IMPORTANT: Students should edit this file directly (no in-browser editor).
+// Homework progression (matches slides):
+//   Level 1: Pixel-wise MSE(Input, Output) -> identity mapping (copycat trap)
+//   Level 2: Distribution constraint via sorted pixels (preserve histogram / "no new colors"):
+//            L_sorted = MSE(sort(Input), sort(Output))
+//   Level 3: Shape constraints:
+//            L_total = L_sorted + λ_smooth * Smoothness(Output) + λ_dir * DirectionX(Output)
+//
+// Students edit this file directly (no in-browser editor).
 // Look for TODO-A / TODO-B / TODO-C.
 
 (() => {
-  // ---------- DOM ----------
+  // -------------------- DOM --------------------
   const el = {
     btnStep: document.getElementById("btnStep"),
     btnAuto: document.getElementById("btnAuto"),
@@ -24,30 +30,26 @@
     archRadios: Array.from(document.querySelectorAll('input[name="arch"]')),
   };
 
-  // ---------- Globals / State ----------
-  const H = 16, W = 16, C = 1;
-  const BATCH = 1;
-
-  // Throttle auto-train
-  const STEPS_PER_FRAME = 2;
+  // -------------------- Globals / State --------------------
+  const H = 16, W = 16, C = 1, B = 1;
+  const STEPS_PER_FRAME = 2; // throttle auto-train for stability
 
   let stepCount = 0;
   let isAuto = false;
 
-  // Fixed input noise (the "puzzle tiles")
-  // Shape: [1, 16, 16, 1]
+  // Fixed input noise per session: [1,16,16,1]
   let xInput = null;
 
-  // Models + optimizers
+  // Two separate models and optimizers
   let baselineModel = null;
   let studentModel = null;
   let baselineOpt = null;
   let studentOpt = null;
 
-  // Student architecture selection (applies to studentModel only)
+  // Student-only architecture selector
   let studentArchType = "compression";
 
-  // ---------- Logging ----------
+  // -------------------- Logging --------------------
   function logLine(msg) {
     const t = new Date().toLocaleTimeString();
     el.log.textContent = `[${t}] ${msg}\n` + el.log.textContent;
@@ -57,143 +59,152 @@
     el.btnAuto.textContent = isAuto ? "Auto Train (Stop)" : "Auto Train (Start)";
   }
 
-  // ---------- Rendering (pixelated 16x16) ----------
+  // -------------------- Rendering (pixelated 16x16) --------------------
   function drawTensorToCanvas01(t4d, canvas) {
-    // Expects shape [1,16,16,1], values in any range; we normalize to [0,255].
+    // Expects shape [1,16,16,1]. Values can be any range; we normalize to [0..255].
     tf.tidy(() => {
       const t = t4d.squeeze(); // [16,16]
       const min = t.min();
       const max = t.max();
       const denom = tf.maximum(max.sub(min), tf.scalar(1e-8));
       const norm = t.sub(min).div(denom).mul(255).clipByValue(0, 255).toInt(); // [16,16]
-      const data = norm.dataSync(); // 256 ints
+      const data = norm.dataSync();
 
-      const ctx = canvas.getContext("2d", { willReadFrequently: false });
+      const ctx = canvas.getContext("2d");
       const img = ctx.createImageData(W, H);
       for (let i = 0; i < W * H; i++) {
         const v = data[i];
         const j = i * 4;
-        img.data[j + 0] = v; // R
-        img.data[j + 1] = v; // G
-        img.data[j + 2] = v; // B
-        img.data[j + 3] = 255; // A
+        img.data[j + 0] = v;
+        img.data[j + 1] = v;
+        img.data[j + 2] = v;
+        img.data[j + 3] = 255;
       }
       ctx.putImageData(img, 0, 0);
     });
   }
 
-  // ---------- Loss helpers (provided for students) ----------
+  function renderAll() {
+    tf.tidy(() => {
+      const yBase = baselineModel.apply(xInput);
+      const yStu = studentModel.apply(xInput);
+      drawTensorToCanvas01(xInput, el.canvasInput);
+      drawTensorToCanvas01(yBase, el.canvasBaseline);
+      drawTensorToCanvas01(yStu, el.canvasStudent);
+    });
+  }
+
+  // -------------------- Helper losses (provided, implemented, used) --------------------
   function mse(yTrue, yPred) {
-    // Pixel-wise MSE (Level 1 trap)
+    // Level 1 trap: pins every pixel to its original position.
     return tf.mean(tf.square(yTrue.sub(yPred)));
+  }
+
+  function sortedMSE(yTrue, yPred) {
+    // Level 2 distribution constraint:
+    // Compare sorted pixel values -> preserves histogram ("no new colors") but frees positions.
+    //
+    // Implementation: flatten to [256], use tf.topk to sort (descending).
+    const a = yTrue.reshape([H * W]);
+    const b = yPred.reshape([H * W]);
+    const aSorted = tf.topk(a, H * W, true).values;
+    const bSorted = tf.topk(b, H * W, true).values;
+    return tf.mean(tf.square(aSorted.sub(bSorted)));
   }
 
   function smoothness(yPred) {
     // Total-variation-like smoothness:
-    // sum of squared differences between neighbors (encourages local consistency)
-    // yPred shape: [1,H,W,1]
-    const dy = yPred.slice([0, 1, 0, 0], [BATCH, H - 1, W, C])
-      .sub(yPred.slice([0, 0, 0, 0], [BATCH, H - 1, W, C]));
-    const dx = yPred.slice([0, 0, 1, 0], [BATCH, H, W - 1, C])
-      .sub(yPred.slice([0, 0, 0, 0], [BATCH, H, W - 1, C]));
+    // Squared neighbor differences (encourages local consistency).
+    const dy = yPred.slice([0, 1, 0, 0], [B, H - 1, W, C])
+      .sub(yPred.slice([0, 0, 0, 0], [B, H - 1, W, C]));
+    const dx = yPred.slice([0, 0, 1, 0], [B, H, W - 1, C])
+      .sub(yPred.slice([0, 0, 0, 0], [B, H, W - 1, C]));
     return tf.mean(tf.square(dx)).add(tf.mean(tf.square(dy)));
   }
 
   function directionX(yPred) {
-    // Encourage left-dark / right-bright by aligning intensity with an x-coordinate mask.
-    // We create a mask from -1 (left) to +1 (right). Higher output on right => higher correlation.
-    // Loss is NEG correlation (so minimizing increases correlation).
-    //
-    // Intuition: If output is brighter on the right, output * mask is larger on average.
+    // Encourage left-dark / right-bright via correlation with an x mask from -1..+1.
+    // Minimizing -mean(output * mask) increases brightness on the right.
     const x = tf.linspace(-1, 1, W).reshape([1, 1, W, 1]); // [1,1,W,1]
     const mask = x.tile([1, H, 1, 1]); // [1,H,W,1]
     return tf.neg(tf.mean(yPred.mul(mask)));
   }
 
-  function sortedMSE(yTrue, yPred) {
-    // Level 2: distribution constraint (aka "quantile loss" / 1D Wasserstein-ish flavor)
-    // We compare sorted pixel values, which preserves the histogram ("no new colors"),
-    // while allowing pixels to move anywhere.
-    //
-    // NOTE: This uses topk-sort (hard sort). It’s simple for teaching but not perfectly smooth.
-    // For 256 pixels it’s fine and runs fast in the browser.
-    const a = yTrue.reshape([W * H]); // [256]
-    const b = yPred.reshape([W * H]); // [256]
-
-    // tf.topk sorts descending. We'll use descending for both so it's consistent.
-    const aSorted = tf.topk(a, W * H, true).values;
-    const bSorted = tf.topk(b, W * H, true).values;
-    return tf.mean(tf.square(aSorted.sub(bSorted)));
-  }
-
-  // ---------- Models ----------
+  // -------------------- Models --------------------
   function createCompressionModel() {
-    // "Compression" projection: bottleneck latent
-    // Minimal autoencoder-ish model
+    // Simple bottleneck autoencoder (minimal for browser demo).
     const model = tf.sequential();
-    model.add(tf.layers.flatten({ inputShape: [H, W, C] })); // 256
-    model.add(tf.layers.dense({ units: 32, activation: "relu" })); // bottleneck
-    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" })); // output in [0,1]
+    model.add(tf.layers.flatten({ inputShape: [H, W, C] }));          // 256
+    model.add(tf.layers.dense({ units: 32, activation: "relu" }));   // bottleneck
+    model.add(tf.layers.dense({ units: 256, activation: "sigmoid" })); // keep outputs in [0,1]
     model.add(tf.layers.reshape({ targetShape: [H, W, C] }));
     return model;
   }
 
+  function createBaselineModel() {
+    // Baseline is fixed: compression + pixel-wise MSE.
+    return createCompressionModel();
+  }
+
   // TODO-A (Architecture):
   // Implement createStudentModel(archType) with three projection types:
-  // - compression (already implemented)
-  // - transformation (TODO; same-size latent, think “rearrange without compressing much”)
-  // - expansion (TODO; bigger latent / more channels, then decode)
+  //  - "compression"     (implemented)
+  //  - "transformation"  (TODO) -> must throw until implemented
+  //  - "expansion"       (TODO) -> must throw until implemented
   //
-  // Baseline requirement for this assignment demo:
-  // Only compression is implemented by default. Others must throw a clear error.
+  // NOTE: The UI selector must rebuild ONLY the student model when changed.
   function createStudentModel(archType) {
     if (archType === "compression") return createCompressionModel();
 
     // Students: replace these errors with real implementations.
     if (archType === "transformation") {
-      throw new Error("Student architecture 'transformation' is not implemented yet. (TODO-A)");
+      throw new Error("Student architecture 'transformation' not implemented yet. (TODO-A)");
     }
     if (archType === "expansion") {
-      throw new Error("Student architecture 'expansion' is not implemented yet. (TODO-A)");
+      throw new Error("Student architecture 'expansion' not implemented yet. (TODO-A)");
     }
     throw new Error(`Unknown student architecture: ${archType}`);
   }
 
-  function createBaselineModel() {
-    // Baseline is intentionally fixed to keep comparisons honest.
-    return createCompressionModel();
-  }
-
-  // ---------- Student loss ----------
-  // TODO-B (Custom loss):
-  // Starting point is the Level 1 trap:
-  //   L = MSE(Input, Output)
+  // -------------------- Student loss --------------------
+  // TODO-B (Custom Loss) — THE KEY FIX / PIVOT:
   //
-  // The homework wants you to escape that trap:
-  // Level 2: enforce same pixel distribution ("no new colors"):
-  //   L_sorted = MSE(sort(Input), sort(Output))
+  // Students MUST NOT build custom loss on top of pixel-wise MSE if they want rearrangement.
+  // Why? Pixel-wise MSE locks pixels to their positions, fighting any attempt to move them.
   //
-  // Level 3: add shape constraints:
-  //   L_total = L_sorted + λ_smooth * smoothness(Output) + λ_dir * directionX(Output)
+  // Intended progression:
+  //   1) Level 1 (start): return mse(input, output)  -> copycat identity
+  //   2) Level 2 (pivot): REPLACE pixel-wise MSE with sortedMSE:
+  //         Lsorted = sortedMSE(input, output)
+  //      This enforces "same colors" / histogram match while allowing movement.
+  //   3) Level 3 (intent): add geometry constraints:
+  //         Ltotal = Lsorted + λ_smooth*smoothness(output) + λ_dir*directionX(output)
   //
-  // Default below keeps student model identical to baseline (MSE only).
+  // Recommended starting ranges:
+  //   λ_smooth in [0.05 .. 1.0]
+  //   λ_dir    in [0.05 .. 1.0]
+  //
+  // IMPORTANT: Once you move to Level 2/3, sortedMSE MUST be the base term.
   function studentLoss(yTrue, yPred) {
-    // Baseline / starter: pixel-wise MSE (Level 1)
+    // Level 1 starter (identical to baseline):
     return mse(yTrue, yPred);
 
-    // Example (students can uncomment and tune):
-    // const Lsorted = sortedMSE(yTrue, yPred);
+    // ---- Level 2 / Level 3 template (students: implement by editing) ----
+    // const Lsorted = sortedMSE(yTrue, yPred);    // <- BASE TERM (the pivot!)
     // const Lsmooth = smoothness(yPred);
     // const Ldir = directionX(yPred);
-    // const lambdaSmooth = 0.20; // try 0.05 to 1.0
-    // const lambdaDir = 0.30;    // try 0.05 to 1.0
+    // const lambdaSmooth = 0.20;
+    // const lambdaDir = 0.30;
     // return Lsorted.add(Lsmooth.mul(lambdaSmooth)).add(Ldir.mul(lambdaDir));
   }
 
-  // ---------- Training step (custom loop; no model.fit) ----------
+  // -------------------- Training loop (custom, no model.fit) --------------------
+  // Each step:
+  //   - compute baseline pred + baseline loss
+  //   - compute student pred  + student loss
+  //   - apply gradients separately
   function trainOneStep() {
-    // Returns { baseLoss: number, studentLoss: number } or throws.
-    const out = tf.tidy(() => {
+    const result = tf.tidy(() => {
       // Baseline grads
       const baseRes = tf.variableGrads(() => {
         const yBase = baselineModel.apply(xInput);
@@ -202,72 +213,59 @@
       baselineOpt.applyGradients(baseRes.grads);
 
       // Student grads
-      const studentRes = tf.variableGrads(() => {
+      const stuRes = tf.variableGrads(() => {
         const yStu = studentModel.apply(xInput);
         return studentLoss(xInput, yStu);
       });
-      studentOpt.applyGradients(studentRes.grads);
+      studentOpt.applyGradients(stuRes.grads);
 
       const baseLossVal = baseRes.value.dataSync()[0];
-      const studentLossVal = studentRes.value.dataSync()[0];
+      const stuLossVal = stuRes.value.dataSync()[0];
 
-      // Clean up (variableGrads returns tensors for grads map)
+      // Dispose grads/value tensors created by variableGrads
       Object.values(baseRes.grads).forEach(t => t.dispose());
-      Object.values(studentRes.grads).forEach(t => t.dispose());
+      Object.values(stuRes.grads).forEach(t => t.dispose());
       baseRes.value.dispose();
-      studentRes.value.dispose();
+      stuRes.value.dispose();
 
-      return { baseLossVal, studentLossVal };
+      return { baseLossVal, stuLossVal };
     });
 
     stepCount += 1;
     el.badgeStep.textContent = `step: ${stepCount}`;
-    el.metaBase.textContent = `loss: ${out.baseLossVal.toFixed(5)}`;
-    el.metaStudent.textContent = `loss: ${out.studentLossVal.toFixed(5)}`;
-    return out;
+    el.metaBase.textContent = `loss: ${result.baseLossVal.toFixed(5)}`;
+    el.metaStudent.textContent = `loss: ${result.stuLossVal.toFixed(5)}`;
+
+    // TODO-C (Comparison):
+    // This starter log already compares losses each step.
+    // Students can enhance it (e.g., show deltas, highlight when student diverges).
+    logLine(`step=${stepCount}  baseline=${result.baseLossVal.toFixed(5)}  student=${result.stuLossVal.toFixed(5)}`);
+
+    return result;
   }
 
-  function renderAll() {
-    tf.tidy(() => {
-      const yBase = baselineModel.apply(xInput);
-      const yStu = studentModel.apply(xInput);
-
-      drawTensorToCanvas01(xInput, el.canvasInput);
-      drawTensorToCanvas01(yBase, el.canvasBaseline);
-      drawTensorToCanvas01(yStu, el.canvasStudent);
-    });
-  }
-
-  // TODO-C (Comparison):
-  // - Print and compare baseline vs student losses
-  // - Visually inspect differences between baseline/student outputs.
-  // Starter implementation below logs losses every step.
-
-  // ---------- Lifecycle / reset ----------
+  // -------------------- Setup / Reset --------------------
   function disposeModel(m) {
     if (!m) return;
-    m.layers?.forEach(layer => layer.dispose?.());
-    m.dispose?.();
+    try { m.dispose(); } catch (_) {}
   }
 
   function initInput() {
     if (xInput) xInput.dispose();
-    // Fixed seed behavior in browser JS is not guaranteed; we keep it fixed per session.
-    // Use uniform noise in [0,1] so "colors" are bounded.
-    xInput = tf.randomUniform([BATCH, H, W, C], 0, 1, "float32");
+    // Fixed per session (not re-randomized unless Reset is pressed).
+    // Values in [0,1] so histogram is bounded and "no new colors" is meaningful.
+    xInput = tf.randomUniform([B, H, W, C], 0, 1, "float32");
   }
 
-  function buildAllModels() {
-    // Dispose old
+  function buildBaseline() {
     disposeModel(baselineModel);
-    disposeModel(studentModel);
-
-    // Build new
     baselineModel = createBaselineModel();
-    studentModel = createStudentModel(studentArchType);
-
-    // Fresh optimizers
     baselineOpt = tf.train.adam(0.03);
+  }
+
+  function buildStudent() {
+    disposeModel(studentModel);
+    studentModel = createStudentModel(studentArchType);
     studentOpt = tf.train.adam(0.03);
   }
 
@@ -281,28 +279,23 @@
     initInput();
 
     try {
-      buildAllModels();
+      buildBaseline();
+      buildStudent();
       renderAll();
-      logLine("Reset complete. Baseline: MSE. Student: starter (MSE).");
+      logLine("Reset complete. Baseline: pixel-wise MSE. Student: starter (pixel-wise MSE).");
     } catch (err) {
       logLine(`ERROR during reset: ${err.message}`);
       console.error(err);
     }
   }
 
-  // ---------- Auto train loop ----------
+  // -------------------- Auto-train loop --------------------
   function autoLoop() {
     if (!isAuto) return;
 
     try {
-      let last = null;
-      for (let i = 0; i < STEPS_PER_FRAME; i++) {
-        last = trainOneStep();
-      }
+      for (let i = 0; i < STEPS_PER_FRAME; i++) trainOneStep();
       renderAll();
-      if (last) {
-        logLine(`step=${stepCount} base=${last.baseLossVal.toFixed(5)} student=${last.studentLossVal.toFixed(5)}`);
-      }
     } catch (err) {
       isAuto = false;
       setAutoButtonLabel();
@@ -313,12 +306,11 @@
     requestAnimationFrame(autoLoop);
   }
 
-  // ---------- Events ----------
+  // -------------------- Events --------------------
   el.btnStep.addEventListener("click", () => {
     try {
-      const r = trainOneStep();
+      trainOneStep();
       renderAll();
-      logLine(`step=${stepCount} base=${r.baseLossVal.toFixed(5)} student=${r.studentLossVal.toFixed(5)}`);
     } catch (err) {
       logLine(`ERROR: ${err.message}`);
       console.error(err);
@@ -328,12 +320,8 @@
   el.btnAuto.addEventListener("click", () => {
     isAuto = !isAuto;
     setAutoButtonLabel();
-    if (isAuto) {
-      logLine("Auto-train started.");
-      requestAnimationFrame(autoLoop);
-    } else {
-      logLine("Auto-train stopped.");
-    }
+    logLine(isAuto ? "Auto-train started." : "Auto-train stopped.");
+    if (isAuto) requestAnimationFrame(autoLoop);
   });
 
   el.btnReset.addEventListener("click", () => {
@@ -342,23 +330,22 @@
     resetAll();
   });
 
+  // Architecture selector applies ONLY to student model
   el.archRadios.forEach(r => {
     r.addEventListener("change", () => {
       if (!r.checked) return;
       studentArchType = r.value;
 
-      // Changing architecture should rebuild student model so weights match chosen structure.
       isAuto = false;
       setAutoButtonLabel();
+
       try {
-        // Keep the same input noise; just rebuild models.
-        buildAllModels();
+        buildStudent();
         stepCount = 0;
         el.badgeStep.textContent = `step: ${stepCount}`;
-        el.metaBase.textContent = `loss: —`;
         el.metaStudent.textContent = `loss: —`;
         renderAll();
-        logLine(`Student architecture set to "${studentArchType}". Models rebuilt.`);
+        logLine(`Student architecture set to "${studentArchType}". Student model rebuilt.`);
       } catch (err) {
         logLine(`ERROR selecting architecture "${studentArchType}": ${err.message}`);
         console.error(err);
@@ -366,10 +353,9 @@
     });
   });
 
-  // ---------- Boot ----------
+  // -------------------- Boot --------------------
   (async function main() {
     try {
-      // Warm up TF.js backend
       await tf.ready();
       logLine(`TF.js ready. Backend: ${tf.getBackend()}`);
       resetAll();
