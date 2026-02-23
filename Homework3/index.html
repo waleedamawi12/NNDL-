@@ -50,6 +50,7 @@
       margin-top:8px;
       color:var(--muted);
       font-size:14px;
+      line-height:1.45;
     }
     .wrap{
       max-width:1200px;
@@ -81,9 +82,7 @@
       text-transform:uppercase;
       color:rgba(232,238,255,.92);
     }
-    .panelBody{
-      padding:14px;
-    }
+    .panelBody{ padding:14px; }
 
     .controls{
       display:flex;
@@ -109,11 +108,7 @@
     button:active{ transform: translateY(1px); }
     button.primary{ border-color: rgba(122,162,255,.45); background: rgba(122,162,255,.18); }
     button.danger{ border-color: rgba(255,107,107,.45); background: rgba(255,107,107,.12); }
-    button:disabled{
-      opacity:.5;
-      cursor:not-allowed;
-      transform:none;
-    }
+    button:disabled{ opacity:.5; cursor:not-allowed; transform:none; }
 
     .arch{
       display:flex;
@@ -214,6 +209,13 @@
       background: rgba(255,255,255,.05);
       color: rgba(232,238,255,.92);
     }
+    .row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      align-items:center;
+      justify-content:space-between;
+    }
   </style>
 </head>
 
@@ -221,8 +223,9 @@
   <header>
     <h1>Neural Network Design: The Gradient Puzzle</h1>
     <div class="subtitle">
-      Two models learn from the same 16×16 fixed noise input. Baseline uses plain MSE (the “trap”).
-      The student model is meant to be edited in <span class="pill">app.js</span> (custom loss + architecture).
+      Baseline uses pixel-wise MSE (the identity “trap”). The student model starts identical, but you’ll edit
+      <span class="pill">app.js</span> to switch to <b>sorted MSE</b> (distribution constraint) and then add
+      <b>smoothness</b> + <b>direction</b> to create a left→right gradient.
     </div>
   </header>
 
@@ -230,7 +233,7 @@
     <section class="panel">
       <div class="panelHeader">
         <h2>Controls</h2>
-        <div class="hint">Auto-train is throttled to keep Chrome happy.</div>
+        <div class="hint">Auto-train is throttled so Chrome doesn’t melt.</div>
       </div>
       <div class="panelBody">
         <div class="controls">
@@ -249,8 +252,9 @@
         </div>
 
         <div class="hint">
-          Homework arc: <b>Level 1</b> (pixel-wise MSE copies input), <b>Level 2</b> (distribution constraint via sorted pixels),
-          <b>Level 3</b> (shape constraints: smoothness + direction → gradient).
+          Slide logic: <b>Level 1</b> MSE(Input,Output) freezes positions (copycat).
+          <b>Level 2</b> sorted MSE preserves histogram but frees positions.
+          <b>Level 3</b> smoothness + direction gives the pixels “intent.”
         </div>
       </div>
     </section>
@@ -258,7 +262,9 @@
     <section class="panel">
       <div class="panelHeader">
         <h2>Canvases</h2>
-        <div class="hint">Render is intentionally pixelated (nearest-neighbor vibe).</div>
+        <div class="row">
+          <div class="pill" id="badgeStep">step: 0</div>
+        </div>
       </div>
       <div class="panelBody">
         <div class="grid">
@@ -294,9 +300,9 @@
         </div>
 
         <div style="margin-top:12px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+          <div class="row" style="margin-bottom:8px;">
             <div style="color:rgba(232,238,255,.9); font-weight:800; font-size:13px; letter-spacing:.3px;">Status / Log</div>
-            <div class="pill" id="badgeStep">step: 0</div>
+            <div class="hint" style="margin:0;">Shows step, losses, and errors.</div>
           </div>
           <div id="log" class="log" aria-live="polite"></div>
         </div>
