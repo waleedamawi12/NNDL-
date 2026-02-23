@@ -1,0 +1,282 @@
+<!-- index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Autoencoder Inpainting — Your Photo</title>
+
+  <!-- TF.js (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+
+  <style>
+    :root{
+      --bg:#0b0f17;
+      --panel:#121a27;
+      --panel2:#0f1622;
+      --text:#e7eefc;
+      --muted:#9fb0d0;
+      --accent:#7aa2ff;
+      --border:rgba(255,255,255,0.12);
+      --good:#2ee59d;
+      --bad:#ff6b6b;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family:var(--sans);
+      color:var(--text);
+      background:
+        radial-gradient(1200px 600px at 10% 0%, rgba(122,162,255,.15), transparent 55%),
+        radial-gradient(900px 500px at 100% 20%, rgba(46,229,157,.10), transparent 55%),
+        var(--bg);
+    }
+    header{
+      padding:18px 18px 10px;
+      border-bottom:1px solid var(--border);
+      background: linear-gradient(to bottom, rgba(255,255,255,.04), transparent);
+    }
+    h1{ margin:0; font-size:18px; letter-spacing:.2px; }
+    .sub{ margin:6px 0 0; color:var(--muted); font-size:13px; max-width: 1000px; }
+
+    main{
+      padding:14px 18px 22px;
+      display:grid;
+      grid-template-columns: 360px 1fr;
+      gap:14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      main{ grid-template-columns: 1fr; }
+    }
+    .panel{
+      background: linear-gradient(to bottom, rgba(255,255,255,.03), transparent 60%), var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      overflow:hidden;
+    }
+    .panel h2{
+      margin:0;
+      padding:12px 12px 10px;
+      font-size:13px;
+      color:var(--muted);
+      border-bottom:1px solid var(--border);
+      background: rgba(0,0,0,.10);
+      letter-spacing:.3px;
+      text-transform: uppercase;
+    }
+    .panel .body{ padding:12px; }
+
+    .row{ display:grid; gap:10px; margin-top:10px; }
+    .card{
+      background: var(--panel2);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px;
+    }
+    label{ font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+    input[type="file"]{ width:100%; }
+    .inline{
+      display:flex; gap:10px; align-items:center; justify-content:space-between; flex-wrap:wrap;
+    }
+    .inline > div{ flex: 1 1 120px; min-width: 120px; }
+    input[type="range"]{ width:100%; }
+    select, input[type="number"]{
+      width:100%;
+      background: rgba(255,255,255,.05);
+      border:1px solid var(--border);
+      color: var(--text);
+      padding:8px 8px;
+      border-radius:10px;
+      outline:none;
+    }
+    .btns{ display:flex; flex-wrap:wrap; gap:10px; }
+    button{
+      appearance:none;
+      border:1px solid var(--border);
+      background: linear-gradient(to bottom, rgba(122,162,255,.16), rgba(0,0,0,.12));
+      color:var(--text);
+      border-radius:12px;
+      padding:10px 10px;
+      font-weight:600;
+      cursor:pointer;
+      transition: transform .06s ease, filter .15s ease, border-color .15s ease;
+      user-select:none;
+      min-width: 160px;
+    }
+    button:hover{ filter: brightness(1.08); border-color: rgba(122,162,255,.35); }
+    button:active{ transform: translateY(1px); }
+    button.secondary{
+      background: linear-gradient(to bottom, rgba(255,255,255,.06), rgba(0,0,0,.10));
+    }
+    button.danger{
+      background: linear-gradient(to bottom, rgba(255,107,107,.18), rgba(0,0,0,.12));
+    }
+    .badge{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      padding: 2px 8px;
+      border:1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,.04);
+      white-space:nowrap;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap:14px;
+      padding:12px;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+    .viz{
+      background: var(--panel2);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:10px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .viz .top{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      color:var(--muted);
+      font-size:12px;
+    }
+    canvas{
+      width:100%;
+      aspect-ratio: 1 / 1;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background: #05070b;
+      image-rendering: pixelated;
+    }
+
+    .log{
+      padding:10px 12px 12px;
+      border-top:1px solid var(--border);
+      background: rgba(0,0,0,.12);
+    }
+    pre{
+      margin:0;
+      font-family:var(--mono);
+      font-size:12px;
+      line-height:1.35;
+      color:#dbe6ff;
+      white-space:pre-wrap;
+      word-break:break-word;
+      max-height: 220px;
+      overflow:auto;
+    }
+    .hint{ color: var(--muted); font-size:12px; margin:8px 0 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Autoencoder Inpainting — Your Photo</h1>
+    <p class="sub">
+      Upload a photo, then train a tiny inpainting model that learns to fill missing blocks.
+      Click on the <span class="badge">Masked Input</span> canvas to place the missing square.
+      This is the “reconstruction game” — and the loss decides what the model cares about.
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Controls</h2>
+      <div class="body">
+        <div class="row">
+          <div class="card">
+            <label>1) Upload your photo</label>
+            <input id="filePhoto" type="file" accept="image/*" />
+            <p class="hint">Tip: portraits work great. The model resizes to 128×128.</p>
+          </div>
+
+          <div class="card">
+            <div class="inline">
+              <div>
+                <label>Mask size (pixels)</label>
+                <input id="maskSize" type="number" min="8" max="64" step="4" value="32" />
+              </div>
+              <div>
+                <label>Train steps per frame</label>
+                <input id="spf" type="number" min="1" max="30" step="1" value="6" />
+              </div>
+            </div>
+            <div class="inline" style="margin-top:10px">
+              <div>
+                <label>Learning rate</label>
+                <select id="lr">
+                  <option value="0.001">1e-3</option>
+                  <option value="0.0005" selected>5e-4</option>
+                  <option value="0.0002">2e-4</option>
+                </select>
+              </div>
+              <div>
+                <label>Loss on masked area only</label>
+                <select id="maskedOnly">
+                  <option value="1" selected>Yes (recommended)</option>
+                  <option value="0">No (whole image)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="btns">
+              <button id="btnBuild" class="secondary">Build / Rebuild Model</button>
+              <button id="btnStep">Train 1 Step</button>
+              <button id="btnAuto" class="secondary">Auto Train (Start)</button>
+              <button id="btnReset" class="danger">Reset Weights</button>
+              <button id="btnPredict" class="secondary">Predict Inpaint</button>
+            </div>
+            <p class="hint">
+              Auto-train stops on plateau / max steps. If you change mask size, rebuild the model.
+            </p>
+          </div>
+
+          <div class="card">
+            <div class="inline" style="justify-content:space-between">
+              <div class="badge" id="status">Step: — | Loss: —</div>
+              <div class="badge" id="mem">tf.memory: —</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="log">
+        <pre id="log"></pre>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Inpainting View (Click to place mask)</h2>
+      <div class="grid">
+        <div class="viz">
+          <div class="top"><span>Original (resized)</span><span class="badge">target</span></div>
+          <canvas id="cvOrig" width="128" height="128"></canvas>
+        </div>
+        <div class="viz">
+          <div class="top"><span>Masked Input</span><span class="badge">click to move mask</span></div>
+          <canvas id="cvMasked" width="128" height="128"></canvas>
+        </div>
+        <div class="viz">
+          <div class="top"><span>Reconstruction (prediction)</span><span class="badge">output</span></div>
+          <canvas id="cvRecon" width="128" height="128"></canvas>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
