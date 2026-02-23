@@ -36,7 +36,7 @@ const cvRecon = $("#cvRecon");
 
 // -----------------------------------------------------------------------------
 // Config
-const H = 192, W = 192, C = 3;
+const H = 512, W = 512, C = 3;
 const SHAPE = [1, H, W, C];
 
 // Auto-stop
@@ -563,3 +563,4 @@ maskSizeEl.addEventListener("change", () => renderInteractive());
   log("Ready. Upload a photo to begin.", "ok");
   log("Quality tips: use Masked-only loss, mask 32–64, train 2–5k steps.", "info");
 })();
+
