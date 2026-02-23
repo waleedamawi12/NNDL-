@@ -1,4 +1,4 @@
-<!-- index.html (fixed layout: vertical/stacked, not side-by-side wide) -->
+<!-- index.html (add Sigmoid Gate feature-importance section + button + table container) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14,6 +14,7 @@
     :root{
       --bg:#0b1020; --panel:#111a33; --muted:#93a4c7; --text:#e8eeff;
       --border:rgba(255,255,255,.12); --accent:#7aa2ff; --danger:#ff6b6b; --ok:#2ee59d;
+      --good:#3fb950; --goodBg: rgba(63,185,80,.14);
     }
     *{box-sizing:border-box}
     body{
@@ -32,13 +33,7 @@
     header .subtitle{color:var(--muted); font-size:13px}
 
     main{max-width:1180px; margin:0 auto; padding:16px; display:grid; gap:12px}
-
-    /* ✅ FIX: make layout vertical/stacked by default */
-    .stack{
-      display:grid;
-      gap:12px;
-      grid-template-columns: 1fr; /* always one column */
-    }
+    .stack{display:grid; gap:12px; grid-template-columns: 1fr;}
 
     .card{
       background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));
@@ -61,10 +56,9 @@
     }
     .btn:active{transform: translateY(1px)}
     .btn.secondary{background:rgba(255,255,255,.06)}
-    .btn.danger{background:rgba(255,107,107,.12)}
     .btn.ok{background:rgba(46,229,157,.10)}
+    .btn.success{background: rgba(63,185,80,.14); border-color: rgba(63,185,80,.32)}
     .btn:disabled{opacity:.5; cursor:not-allowed}
-
     .pill{
       display:inline-flex; gap:6px; align-items:center;
       font-size:12px; padding:6px 10px; border-radius:999px;
@@ -97,25 +91,14 @@
       background:rgba(17,26,51,.92);
       color:var(--muted); text-align:left;
       border-bottom:1px solid var(--border);
-      padding:8px;
-      white-space:nowrap;
+      padding:8px; white-space:nowrap;
     }
     tbody td{
       border-bottom:1px solid rgba(255,255,255,.06);
-      padding:8px;
-      white-space:nowrap;
+      padding:8px; white-space:nowrap;
     }
-
-    /* Sections that were previously side-by-side now stack on small screens,
-       but can become 2-col on wide screens for readability. */
-    .twoCol{
-      display:grid; grid-template-columns: 1fr;
-      gap:12px;
-    }
-    @media (min-width: 980px){
-      .twoCol{ grid-template-columns: 1fr 1fr; }
-    }
-
+    .twoCol{display:grid; grid-template-columns: 1fr; gap:12px}
+    @media (min-width: 980px){ .twoCol{grid-template-columns: 1fr 1fr;} }
     .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
     .note{
       font-size:12px; color:var(--muted); line-height:1.35;
@@ -136,13 +119,49 @@
       padding:8px;
     }
     .footerNote{font-size:12px; color:var(--muted); padding:6px 2px}
+
+    /* Feature importance table */
+    .fiTable { width:100%; border-collapse: collapse; font-size: 13px; }
+    .fiTable th, .fiTable td { padding:10px; border-bottom:1px solid rgba(255,255,255,.10); }
+    .fiTable th { color:var(--muted); text-align:left; }
+    .barWrap{
+      width:100%;
+      background: rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:8px;
+      height:20px;
+      overflow:hidden;
+      position:relative;
+    }
+    .bar{
+      height:100%;
+      background: var(--good);
+      width:0%;
+    }
+    .barLabel{
+      position:absolute; inset:0;
+      display:flex; align-items:center; padding-left:8px;
+      font-size:12px; color:#0b1020; font-weight:800;
+      mix-blend-mode: screen;
+    }
+    .fiInterpret{
+      margin-top:10px;
+      background: var(--goodBg);
+      border: 1px solid rgba(63,185,80,.25);
+      border-radius: 12px;
+      padding: 10px;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .fiInterpret ul{margin:8px 0 0 18px}
   </style>
 </head>
 <body>
   <header>
     <div class="title">
       <h1>Titanic TF.js — Shallow Binary Classifier</h1>
-      <span class="subtitle">Browser-only • GitHub Pages friendly • ROC/AUC + threshold slider</span>
+      <span class="subtitle">Browser-only • GitHub Pages friendly • ROC/AUC + threshold slider • Sigmoid Gate FI</span>
     </div>
   </header>
 
@@ -158,7 +177,6 @@
       (file inputs below can override).
     </div>
 
-    <!-- ✅ FIX: everything now flows vertically -->
     <div class="stack">
 
       <section class="card">
@@ -179,7 +197,7 @@
         <div class="twoCol" style="margin-top:10px">
           <div class="card" style="padding:10px">
             <h2 style="margin:0 0 8px; font-size:14px">Train Preview</h2>
-            <div id="trainMeta" class="kv">
+            <div class="kv">
               <div>Rows / Cols</div><div class="mono" id="trainShape">—</div>
               <div>Missingness (Top)</div><div class="mono" id="trainMissing">—</div>
             </div>
@@ -190,7 +208,7 @@
 
           <div class="card" style="padding:10px">
             <h2 style="margin:0 0 8px; font-size:14px">Test Preview</h2>
-            <div id="testMeta" class="kv">
+            <div class="kv">
               <div>Rows / Cols</div><div class="mono" id="testShape">—</div>
               <div>Missingness (Top)</div><div class="mono" id="testMissing">—</div>
             </div>
@@ -248,7 +266,7 @@
         <h2>5) Metrics (ROC/AUC + Threshold)</h2>
         <div class="row">
           <button id="btnEval" class="btn secondary" disabled>Evaluate</button>
-          <span id="aucPill" class="pill"><strong>AUC</strong> <span class="muted" id="aucText">—</span></span>
+          <span class="pill"><strong>AUC</strong> <span class="muted" id="aucText">—</span></span>
         </div>
 
         <div class="sliderRow" style="margin-top:10px">
@@ -289,10 +307,45 @@
         </div>
       </section>
 
+      <!-- ✅ NEW: Sigmoid Gate Feature Importance -->
+      <section class="card" id="sigmoidGateCard">
+        <div class="row" style="justify-content:space-between">
+          <h2 style="margin:0">Analyze Feature Importance (Sigmoid Gate)</h2>
+          <button id="btnGateAnalyze" class="btn success" disabled>Analyze Feature Importance</button>
+        </div>
+        <div class="muted" style="margin-top:6px; font-size:13px">
+          Shows which features most influence the model predictions using a <span class="mono">sigmoid gate mask</span>.
+        </div>
+
+        <div class="tableWrap" style="margin-top:10px; max-height:520px">
+          <table class="fiTable" id="fiTable">
+            <thead>
+              <tr>
+                <th style="width:32%">Feature</th>
+                <th>Importance Score</th>
+                <th style="width:10%">Rank</th>
+              </tr>
+            </thead>
+            <tbody id="fiBody">
+              <tr><td colspan="3" class="muted">Train a model, then click “Analyze Feature Importance”.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="fiInterpret" id="fiInterpret">
+          <strong>Interpretation:</strong>
+          <ul>
+            <li><strong>High importance (&gt;0.15):</strong> features with strongest influence.</li>
+            <li><strong>Medium (0.05–0.15):</strong> moderate influence.</li>
+            <li><strong>Low (&lt;0.05):</strong> minimal influence.</li>
+          </ul>
+          <div style="margin-top:8px" class="mono" id="fiTop3">Top 3 most important features: —</div>
+        </div>
+      </section>
+
     </div>
   </main>
 
-  <!-- App logic -->
   <script src="./app.js"></script>
 </body>
 </html>
