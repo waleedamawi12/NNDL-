@@ -36,7 +36,7 @@ const cvRecon = $("#cvRecon");
 
 // -----------------------------------------------------------------------------
 // Config
-const H = 512, W = 512, C = 3;
+const H = 256, W = 256, C = 3;
 const SHAPE = [1, H, W, C];
 
 // Auto-stop
@@ -335,7 +335,7 @@ function lossFn(yTrue, yPred, mask){
 function renderInteractive(){
   if (!imgTargetFull) return;
 
-  const size = clampInt(+maskSizeEl.value, 12, 512);
+  const size = clampInt(+maskSizeEl.value, 12, 256);
   const x = clampInt(maskXY.x, 0, W - size);
   const y = clampInt(maskXY.y, 0, H - size);
   maskXY = { x, y };
@@ -378,7 +378,7 @@ async function trainStep(){
     return NaN;
   }
 
-  const size = clampInt(+maskSizeEl.value, 12, 512);
+  const size = clampInt(+maskSizeEl.value, 12, 256);
 
   const lossTensor = tf.tidy(() => {
     // Training example = random crop (more data), random mask inside that crop.
@@ -508,7 +508,7 @@ filePhoto.addEventListener("change", async (e) => {
     if (imgTargetFull) imgTargetFull.dispose();
     imgTargetFull = await loadImageToTensor(f);
 
-    const size = clampInt(+maskSizeEl.value, 12, 512);
+    const size = clampInt(+maskSizeEl.value, 12, 256);
     maskXY = { x: Math.floor((W - size)/2), y: Math.floor((H - size)/2) };
 
     log(`Photo loaded and resized to ${W}×${H}.`, "ok");
@@ -544,7 +544,7 @@ cvMasked.addEventListener("click", (ev) => {
   const px = (ev.clientX - rect.left) / rect.width;
   const py = (ev.clientY - rect.top) / rect.height;
 
-  const size = clampInt(+maskSizeEl.value, 12, 512);
+  const size = clampInt(+maskSizeEl.value, 12, 256);
   const x = clampInt(Math.floor(px * W - size/2), 0, W - size);
   const y = clampInt(Math.floor(py * H - size/2), 0, H - size);
 
@@ -563,5 +563,6 @@ maskSizeEl.addEventListener("change", () => renderInteractive());
   log("Ready. Upload a photo to begin.", "ok");
   log("Quality tips: use Masked-only loss, mask 32–64, train 2–5k steps.", "info");
 })();
+
 
 
