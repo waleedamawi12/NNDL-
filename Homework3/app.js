@@ -1,16 +1,10 @@
 // app.js
-// Neural Network Design: The Gradient Puzzle
+// Neural Network Design: The Gradient Puzzle (2-file version)
 //
-// Your homework target (like the slide):
-// - Baseline stays copycat/noise-like (pixel-wise MSE locks positions).
-// - Student becomes a smooth left→right gradient BUT keeps the SAME histogram (no new colors).
-//
-// That requires Level 2 + Level 3 losses:
-//   Lsorted = sortedMSE(input, output)
-//   Ltotal  = Lsorted + λ_smooth * smoothness(output) + λ_dir * directionX(output)
-//
-// IMPORTANT: If you keep pixel-wise MSE in the student loss, you will NOT get rearrangement.
-//
+// Fix: index.html loads THIS file as "app.js".
+// Baseline: pixel-wise MSE (copycat / stuck).
+// Student: sortedMSE (distribution constraint) + smoothness + direction (forms gradient).
+
 // -----------------------------------------------------------------------------
 // DOM
 const $ = (sel) => document.querySelector(sel);
@@ -45,7 +39,7 @@ const AUTO_MAX_STEPS = 5000;
 const PLATEAU_PATIENCE = 900;
 const MIN_DELTA = 1e-8;
 
-// Loss weights (tuned to reliably produce the slide-like gradient)
+// Loss weights
 const LAMBDA_SMOOTH = 1.2; // try 0.5–2.5
 const LAMBDA_DIR = 2.2;    // try 1.0–4.0
 
@@ -95,7 +89,7 @@ function drawTensorToCanvas(t4d, canvas) {
   const img = ctx.createImageData(W, H);
   const data = img.data;
 
-  const vals = t4d.dataSync();
+  const vals = t4d.dataSync(); // length 256
   for (let i = 0; i < H * W; i++) {
     const v01 = Math.max(0, Math.min(1, vals[i]));
     const v = Math.round(v01 * 255);
@@ -120,6 +114,8 @@ function sortedMSE(yTrue, yPred) {
     const a = yTrue.flatten();
     const b = yPred.flatten();
     const N = a.size;
+
+    // topk is a practical way to sort 1D tensors in tfjs
     const aSorted = tf.topk(a, N, true).values;
     const bSorted = tf.topk(b, N, true).values;
     return tf.mean(tf.square(tf.sub(aSorted, bSorted)));
@@ -157,7 +153,6 @@ function createBaselineModel() {
   return tf.model({ inputs: inp, outputs: out, name: "baselineModel" });
 }
 
-// Projection types for student (all implemented)
 function createStudentModel(archType) {
   const inp = tf.input({ shape: [H, W, 1] });
 
@@ -171,7 +166,6 @@ function createStudentModel(archType) {
   }
 
   if (archType === "transformation") {
-    // Same spatial size: conv mixing + residual
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
@@ -183,7 +177,6 @@ function createStudentModel(archType) {
   }
 
   if (archType === "expansion") {
-    // Overcomplete: expand channels then project down
     let x = inp;
     x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
@@ -203,8 +196,10 @@ function baselineLoss(yTrue, yPred) {
 }
 
 function studentLoss(yTrue, yPred) {
-  // Homework solution (Level 3):
-  // DO NOT use pixel-wise MSE here if you want rearrangement.
+  // Homework solution:
+  // - sortedMSE keeps histogram
+  // - smoothness makes it locally consistent
+  // - direction makes it bright on the right
   const Lsorted = sortedMSE(yTrue, yPred);
   const Lsmooth = smoothness(yPred);
   const Ldir = directionX(yPred);
@@ -247,7 +242,6 @@ async function trainOneStepReturnLosses() {
     studentLossTensor.dispose();
 
     stepCount++;
-
     setStatus({ step: stepCount, baseLoss: baseLossVal, studentLoss: studentLossVal });
 
     if (stepCount % LOG_EVERY === 0 || stepCount === 1) {
@@ -267,7 +261,6 @@ async function trainOneStepReturnLosses() {
     log(String(err?.message || err), "error");
   }
 
-  // Plateau tracking (use combined score)
   const combo = (Number.isFinite(baseLossVal) ? baseLossVal : 0) + (Number.isFinite(studentLossVal) ? studentLossVal : 0);
   if (combo + MIN_DELTA < bestComboLoss) {
     bestComboLoss = combo;
@@ -291,6 +284,7 @@ async function autoLoop() {
   for (let i = 0; i < STEPS_PER_FRAME; i++) {
     await trainOneStepReturnLosses();
     await tf.nextFrame();
+
     if (!autoRunning) return;
 
     if (stepCount >= AUTO_MAX_STEPS) {
@@ -335,6 +329,8 @@ function makeXCoordMask() {
 }
 
 function makeFixedNoiseInput() {
+  // fixed random seed isn’t exposed cleanly in TFJS without extra work,
+  // but we keep the SAME tensor for the whole run, so it is “fixed”.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
