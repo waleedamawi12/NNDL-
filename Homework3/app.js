@@ -1,14 +1,19 @@
 // app.js
-// Neural Network Design: The Gradient Puzzle (TFJS, 2-file version)
+// Neural Network Design: The Gradient Puzzle (TFJS / GitHub Pages friendly)
 //
-// FIXED for GitHub Pages / WebGL:
-// - tf.topk() has NO gradient in TFJS ("gradient function not found for TopK").
-// - So we replace sortedMSE(topk-sort) with a differentiable distribution constraint:
-//     CDF loss via soft-histogram (approx 1D Wasserstein / quantile match)
+// Goal:
+// - Baseline: pixel-wise MSE => copycat noise.
+// - Student: rearranges same "inventory of colors" into a left->right gradient.
 //
-// Baseline: pixel-wise MSE only (copycat / stuck).
-// Student: cdfLoss (distribution) + smoothness + direction (forms gradient).
-
+// IMPORTANT FIX:
+// - Do NOT use tf.topk() for "sorting": TFJS WebGL has no gradient for TopK.
+// - Instead, use a differentiable distribution constraint:
+//   soft-histogram CDF loss (approx 1D Wasserstein / quantile match).
+//
+// Also IMPORTANT:
+// - A naive direction loss (-mean(y*mask)) encourages saturation (step function).
+// - We use correlation-based direction loss to encourage a true gradient.
+//
 // -----------------------------------------------------------------------------
 // DOM
 const $ = (sel) => document.querySelector(sel);
@@ -39,17 +44,18 @@ const BASE_LR = 1e-2;
 const STUDENT_LR = 3e-2;
 
 // Auto-stop
-const AUTO_MAX_STEPS = 5000;
-const PLATEAU_PATIENCE = 900;
+const AUTO_MAX_STEPS = 6000;
+const PLATEAU_PATIENCE = 1200;
 const MIN_DELTA = 1e-8;
 
-// Loss weights (tune if you want)
-const LAMBDA_SMOOTH = 2.0; // higher -> less checker/noise
-const LAMBDA_DIR = 2.0;    // higher -> stronger left->right bias
+// Loss weights (tuned to produce a smooth ramp like your target image)
+const LAMBDA_DIST = 10.0;  // distribution/histogram match (strong)
+const LAMBDA_SMOOTH = 1.4; // smoothness (moderate, allows mild texture)
+const LAMBDA_DIR = 1.6;    // direction (moderate; correlation-based avoids step collapse)
 
-// Distribution loss parameters (soft histogram)
-const DIST_BINS = 32;      // 16–64 typical
-const DIST_SIGMA = 0.03;   // 0.02 stricter, 0.05 smoother
+// Differentiable distribution loss parameters
+const DIST_BINS = 64;      // more bins = closer to "sorted" behavior
+const DIST_SIGMA = 0.03;   // softness of bins (0.02 stricter, 0.05 looser)
 
 // -----------------------------------------------------------------------------
 // State
@@ -77,12 +83,12 @@ let stepsSinceBest = 0;
 // Logging helpers
 function log(msg, kind = "info") {
   const prefix = kind === "error" ? "✖ " : kind === "ok" ? "✓ " : "• ";
-  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 5000);
+  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 7000);
 }
 function fmt(x) {
   if (x == null || Number.isNaN(x)) return "—";
   if (!Number.isFinite(x)) return String(x);
-  if (x < 1e-3) return x.toExponential(2);
+  if (Math.abs(x) < 1e-3) return x.toExponential(2);
   return x.toFixed(4);
 }
 function setStatus({ step, baseLoss, studentLoss }) {
@@ -97,7 +103,7 @@ function drawTensorToCanvas(t4d, canvas) {
   const img = ctx.createImageData(W, H);
   const data = img.data;
 
-  const vals = t4d.dataSync();
+  const vals = t4d.dataSync(); // length 256
   for (let i = 0; i < H * W; i++) {
     const v01 = Math.max(0, Math.min(1, vals[i]));
     const v = Math.round(v01 * 255);
@@ -117,8 +123,8 @@ function mse(yTrue, yPred) {
 }
 
 // Differentiable distribution constraint (no topk/sort):
-// Soft-histogram CDF loss ≈ 1D Wasserstein-ish distribution match
-function cdfLoss(yTrue, yPred, bins = 32, sigma = 0.03) {
+// Soft-histogram CDF loss ≈ quantile matching / 1D Wasserstein-ish
+function cdfLoss(yTrue, yPred, bins = 64, sigma = 0.03) {
   return tf.tidy(() => {
     const a = yTrue.flatten(); // [N]
     const b = yPred.flatten(); // [N]
@@ -132,10 +138,10 @@ function cdfLoss(yTrue, yPred, bins = 32, sigma = 0.03) {
       return tf.div(hist, tf.sum(hist)); // normalize
     }
 
-    const ha = softHist(a);         // [B]
-    const hb = softHist(b);         // [B]
-    const cdfa = tf.cumsum(ha);     // [B]
-    const cdfb = tf.cumsum(hb);     // [B]
+    const ha = softHist(a);     // [B]
+    const hb = softHist(b);     // [B]
+    const cdfa = tf.cumsum(ha); // [B]
+    const cdfb = tf.cumsum(hb); // [B]
 
     return tf.mean(tf.square(tf.sub(cdfa, cdfb)));
   });
@@ -156,9 +162,23 @@ function smoothness(yPred) {
   });
 }
 
-function directionX(yPred) {
-  // Minimize -mean(output * mask) => bright on right, dark on left
-  return tf.tidy(() => tf.neg(tf.mean(tf.mul(yPred, xCoordMask))));
+// Correlation-based direction loss:
+// encourages brightness to increase with x, but DOESN'T reward saturating to 0/1.
+function directionCorrX(yPred) {
+  return tf.tidy(() => {
+    const y = yPred.flatten();
+    const x = xCoordMask.flatten();
+
+    const y0 = tf.sub(y, tf.mean(y));
+    const x0 = tf.sub(x, tf.mean(x));
+
+    const cov = tf.mean(tf.mul(y0, x0));
+    const yStd = tf.sqrt(tf.add(tf.mean(tf.square(y0)), 1e-8));
+    const xStd = tf.sqrt(tf.add(tf.mean(tf.square(x0)), 1e-8));
+
+    const corr = tf.div(cov, tf.mul(yStd, xStd)); // [-1, 1]
+    return tf.neg(corr); // minimize => maximize corr
+  });
 }
 
 // -----------------------------------------------------------------------------
@@ -172,7 +192,6 @@ function createBaselineModel() {
   return tf.model({ inputs: inp, outputs: out, name: "baselineModel" });
 }
 
-// Projection types for student (all implemented)
 function createStudentModel(archType) {
   const inp = tf.input({ shape: [H, W, 1] });
 
@@ -186,7 +205,7 @@ function createStudentModel(archType) {
   }
 
   if (archType === "transformation") {
-    // Same spatial size: conv mixing + residual
+    // spatial mixing; often produces cleaner gradients
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
@@ -198,7 +217,6 @@ function createStudentModel(archType) {
   }
 
   if (archType === "expansion") {
-    // Overcomplete: expand channels then project down
     let x = inp;
     x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
@@ -218,19 +236,23 @@ function baselineLoss(yTrue, yPred) {
 }
 
 function studentLoss(yTrue, yPred) {
-  // FIXED: differentiable distribution matching (no TopK gradient issues)
+  // Student = Level 2 + Level 3:
+  // - distribution constraint (cdfLoss) ~ "same histogram"
+  // - smoothness
+  // - direction (correlation with x mask)
   const Ldist = cdfLoss(yTrue, yPred, DIST_BINS, DIST_SIGMA);
   const Lsmooth = smoothness(yPred);
-  const Ldir = directionX(yPred);
+  const Ldir = directionCorrX(yPred);
+
   return tf.addN([
-    Ldist,
+    tf.mul(LAMBDA_DIST, Ldist),
     tf.mul(LAMBDA_SMOOTH, Lsmooth),
     tf.mul(LAMBDA_DIR, Ldir),
   ]);
 }
 
 // -----------------------------------------------------------------------------
-// Training (custom loop, separate optimizers, tidy)
+// Training
 async function trainOneStepReturnLosses() {
   const yTrue = xInput;
 
@@ -284,7 +306,7 @@ async function trainOneStepReturnLosses() {
     log(String(err?.message || err), "error");
   }
 
-  // Plateau tracking (use combined score)
+  // Plateau tracking (combined score)
   const combo =
     (Number.isFinite(baseLossVal) ? baseLossVal : 0) +
     (Number.isFinite(studentLossVal) ? studentLossVal : 0);
@@ -355,7 +377,7 @@ function makeXCoordMask() {
 }
 
 function makeFixedNoiseInput() {
-  // Not a seeded RNG, but we keep the SAME tensor for the whole run, so it is “fixed”.
+  // Not seeded, but fixed for the whole run because we keep the same tensor.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
@@ -455,9 +477,10 @@ async function main() {
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
 
-  log("Ready. Baseline is MSE-copycat. Student is (cdfLoss + smooth + direction).", "ok");
-  log(`Loss weights: lambdaSmooth=${LAMBDA_SMOOTH}, lambdaDir=${LAMBDA_DIR}.`, "info");
-  log(`Dist params: bins=${DIST_BINS}, sigma=${DIST_SIGMA}.`, "info");
+  log("Ready. Baseline is MSE-copycat. Student is (CDF distribution + smooth + direction corr).", "ok");
+  log(`Weights: dist=${LAMBDA_DIST}, smooth=${LAMBDA_SMOOTH}, dir=${LAMBDA_DIR}`, "info");
+  log(`Dist params: bins=${DIST_BINS}, sigma=${DIST_SIGMA}`, "info");
+  log("Tip: 'Compression' usually gives that slightly-checkered gradient look like your target image.", "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
