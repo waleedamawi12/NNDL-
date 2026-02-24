@@ -205,7 +205,7 @@
             <div class="inline">
               <div>
                 <label>Mask size (pixels)</label>
-                <input id="maskSize" type="number" min="16" max="256" step="16" value="32" />
+                <input id="maskSize" type="number" min="16" max="192" step="16" value="32" />
               </div>
               <div>
                 <label>Train steps per frame</label>
@@ -263,15 +263,15 @@
       <div class="grid">
         <div class="viz">
           <div class="top"><span>Original (resized)</span><span class="badge">target</span></div>
-          <canvas id="cvOrig" width="256" height="256"></canvas>
+          <canvas id="cvOrig" width="192" height="192"></canvas>
         </div>
         <div class="viz">
           <div class="top"><span>Masked Input</span><span class="badge">click to move mask</span></div>
-          <canvas id="cvMasked" width="256" height="256"></canvas>
+          <canvas id="cvMasked" width="192" height="192"></canvas>
         </div>
         <div class="viz">
           <div class="top"><span>Reconstruction (prediction)</span><span class="badge">output</span></div>
-          <canvas id="cvRecon" width="256" height="256"></canvas>
+          <canvas id="cvRecon" width="192" height="192"></canvas>
         </div>
       </div>
     </section>
