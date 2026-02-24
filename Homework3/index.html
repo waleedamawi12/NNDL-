@@ -1,0 +1,297 @@
+<!-- index.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Neural Network Design: The Gradient Puzzle</title>
+
+  <!-- TensorFlow.js (CDN, no build tools) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+
+  <style>
+    :root{
+      --bg:#0b0f17;
+      --panel:#121a27;
+      --panel2:#0f1622;
+      --text:#e7eefc;
+      --muted:#9fb0d0;
+      --accent:#7aa2ff;
+      --border:rgba(255,255,255,0.12);
+      --bad:#ff6b6b;
+      --good:#2ee59d;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      background: radial-gradient(1200px 600px at 20% 0%, rgba(122,162,255,.15), transparent 55%),
+                  radial-gradient(900px 500px at 100% 15%, rgba(46,229,157,.10), transparent 55%),
+                  var(--bg);
+      color:var(--text);
+      font-family:var(--sans);
+      line-height:1.35;
+    }
+    header{
+      padding:20px 18px 10px;
+      border-bottom:1px solid var(--border);
+      background: linear-gradient(to bottom, rgba(255,255,255,.04), transparent);
+    }
+    h1{
+      margin:0;
+      font-size:18px;
+      letter-spacing:.2px;
+    }
+    .sub{
+      margin:6px 0 0;
+      color:var(--muted);
+      font-size:13px;
+      max-width: 980px;
+    }
+    main{
+      padding:14px 18px 22px;
+      display:grid;
+      grid-template-columns: 340px 1fr;
+      gap:14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      main{ grid-template-columns: 1fr; }
+    }
+    .panel{
+      background: linear-gradient(to bottom, rgba(255,255,255,.03), transparent 60%), var(--panel);
+      border:1px solid var(--border);
+      border-radius:14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      overflow:hidden;
+    }
+    .panel h2{
+      margin:0;
+      padding:12px 12px 10px;
+      font-size:13px;
+      color:var(--muted);
+      border-bottom:1px solid var(--border);
+      background: rgba(0,0,0,.10);
+      letter-spacing:.3px;
+      text-transform: uppercase;
+    }
+    .panel .body{
+      padding:12px;
+    }
+    .controls{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+    }
+    button{
+      appearance:none;
+      border:1px solid var(--border);
+      background: linear-gradient(to bottom, rgba(122,162,255,.16), rgba(0,0,0,.12));
+      color:var(--text);
+      border-radius:12px;
+      padding:10px 10px;
+      font-weight:600;
+      cursor:pointer;
+      transition: transform .06s ease, filter .15s ease, border-color .15s ease;
+      user-select:none;
+      min-width: 140px;
+    }
+    button:hover{ filter: brightness(1.08); border-color: rgba(122,162,255,.35); }
+    button:active{ transform: translateY(1px); }
+    button.secondary{
+      background: linear-gradient(to bottom, rgba(255,255,255,.06), rgba(0,0,0,.10));
+      min-width: 140px;
+    }
+    button.danger{
+      background: linear-gradient(to bottom, rgba(255,107,107,.18), rgba(0,0,0,.12));
+    }
+    .row{
+      margin-top:12px;
+      display:grid;
+      gap:10px;
+    }
+    .arch{
+      background: var(--panel2);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:10px 10px 8px;
+    }
+    .arch .title{
+      font-size:12px;
+      color:var(--muted);
+      margin:0 0 8px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+    }
+    .arch label{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      padding:6px 6px;
+      border-radius:10px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .arch label:hover{
+      background: rgba(255,255,255,.05);
+    }
+    .arch input{ accent-color: var(--accent); }
+    .tiny{
+      font-size:12px;
+      color:var(--muted);
+      margin:0;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap:14px;
+      padding:12px;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+    .viz{
+      background: var(--panel2);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:10px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .viz .label{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      color:var(--muted);
+      font-size:12px;
+    }
+    canvas{
+      width:100%;
+      aspect-ratio: 1 / 1;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background: #05070b;
+      image-rendering: pixelated;
+    }
+
+    .log{
+      padding:10px 12px 12px;
+      border-top:1px solid var(--border);
+      background: rgba(0,0,0,.12);
+    }
+    pre{
+      margin:0;
+      font-family:var(--mono);
+      font-size:12px;
+      line-height:1.35;
+      color: #dbe6ff;
+      white-space:pre-wrap;
+      word-break:break-word;
+      max-height: 220px;
+      overflow:auto;
+    }
+    .badge{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      padding: 2px 8px;
+      border:1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,.04);
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Neural Network Design: The Gradient Puzzle</h1>
+    <p class="sub">
+      Two models learn from the same fixed 16×16 noise input. Baseline is trapped by pixel-wise MSE (identity/copycat).
+      Student starts identical, but you’ll edit <span class="badge">TODO-B</span> to escape the trap using a <b>distribution constraint</b> (sortedMSE)
+      plus geometry (smoothness + direction).
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Control Panel</h2>
+      <div class="body">
+        <div class="controls">
+          <button id="btnStep">Train 1 Step</button>
+          <button id="btnAuto" class="secondary">Auto Train (Start)</button>
+          <button id="btnReset" class="danger">Reset Weights</button>
+        </div>
+
+        <div class="row">
+          <div class="arch">
+            <div class="title">
+              <span>Student architecture selector</span>
+              <span class="badge">student only</span>
+            </div>
+
+            <label>
+              <input type="radio" name="arch" value="compression" checked />
+              <span>Compression (implemented)</span>
+            </label>
+            <label>
+              <input type="radio" name="arch" value="transformation" />
+              <span>Transformation (implemented)</span>
+            </label>
+            <label>
+              <input type="radio" name="arch" value="expansion" />
+              <span>Expansion (implemented)</span>
+            </label>
+
+            <p class="tiny" style="margin-top:8px">
+              Architecture changes rebuild the student model (baseline stays fixed).
+            </p>
+          </div>
+
+          <div class="arch">
+            <div class="title">
+              <span>Status</span>
+              <span class="badge" id="memBadge">tf.memory: —</span>
+            </div>
+            <p class="tiny" id="statusLine" style="margin:0">
+              Step: — | Baseline loss: — | Student loss: —
+            </p>
+            <p class="tiny" style="margin-top:8px">
+              Auto-train stops automatically when converged (or max steps).
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="log">
+        <pre id="log"></pre>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Canvas Grid</h2>
+      <div class="grid">
+        <div class="viz">
+          <div class="label"><span>Input (fixed noise, 16×16)</span><span class="badge">xInput</span></div>
+          <canvas id="cvInput" width="16" height="16"></canvas>
+        </div>
+        <div class="viz">
+          <div class="label"><span>Baseline Output (MSE)</span><span class="badge">copycat</span></div>
+          <canvas id="cvBase" width="16" height="16"></canvas>
+        </div>
+        <div class="viz">
+          <div class="label"><span>Student Output (initially MSE)</span><span class="badge">edit TODO-B</span></div>
+          <canvas id="cvStudent" width="16" height="16"></canvas>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
