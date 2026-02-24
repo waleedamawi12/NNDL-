@@ -18,17 +18,16 @@
       --muted:#9fb0d0;
       --accent:#7aa2ff;
       --border:rgba(255,255,255,0.12);
-      --bad:#ff6b6b;
-      --good:#2ee59d;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
     }
     *{ box-sizing:border-box; }
     body{
       margin:0;
-      background: radial-gradient(1200px 600px at 20% 0%, rgba(122,162,255,.15), transparent 55%),
-                  radial-gradient(900px 500px at 100% 15%, rgba(46,229,157,.10), transparent 55%),
-                  var(--bg);
+      background:
+        radial-gradient(1200px 600px at 20% 0%, rgba(122,162,255,.15), transparent 55%),
+        radial-gradient(900px 500px at 100% 15%, rgba(46,229,157,.10), transparent 55%),
+        var(--bg);
       color:var(--text);
       font-family:var(--sans);
       line-height:1.35;
@@ -39,7 +38,7 @@
       background: linear-gradient(to bottom, rgba(255,255,255,.04), transparent);
     }
     h1{ margin:0; font-size:18px; letter-spacing:.2px; }
-    .sub{ margin:6px 0 0; color:var(--muted); font-size:13px; max-width: 980px; }
+    .sub{ margin:6px 0 0; color:var(--muted); font-size:13px; max-width:980px; }
 
     main{
       padding:14px 18px 22px;
@@ -48,7 +47,7 @@
       gap:14px;
       align-items:start;
     }
-    @media (max-width: 980px){ main{ grid-template-columns: 1fr; } }
+    @media (max-width:980px){ main{ grid-template-columns:1fr; } }
 
     .panel{
       background: linear-gradient(to bottom, rgba(255,255,255,.03), transparent 60%), var(--panel);
@@ -85,16 +84,10 @@
     }
     button:hover{ filter: brightness(1.08); border-color: rgba(122,162,255,.35); }
     button:active{ transform: translateY(1px); }
-    button.secondary{
-      background: linear-gradient(to bottom, rgba(255,255,255,.06), rgba(0,0,0,.10));
-      min-width: 140px;
-    }
-    button.danger{
-      background: linear-gradient(to bottom, rgba(255,107,107,.18), rgba(0,0,0,.12));
-    }
+    button.secondary{ background: linear-gradient(to bottom, rgba(255,255,255,.06), rgba(0,0,0,.10)); }
+    button.danger{ background: linear-gradient(to bottom, rgba(255,107,107,.18), rgba(0,0,0,.12)); }
 
     .row{ margin-top:12px; display:grid; gap:10px; }
-
     .arch{
       background: var(--panel2);
       border:1px solid var(--border);
@@ -129,7 +122,7 @@
       gap:14px;
       padding:12px;
     }
-    @media (max-width: 980px){ .grid{ grid-template-columns: 1fr; } }
+    @media (max-width:980px){ .grid{ grid-template-columns:1fr; } }
 
     .viz{
       background: var(--panel2);
@@ -154,7 +147,7 @@
       border-radius:12px;
       border:1px solid rgba(255,255,255,.10);
       background:#05070b;
-      image-rendering: pixelated; /* THIS puzzle is intentionally pixelated */
+      image-rendering: pixelated;
     }
 
     .log{
@@ -189,8 +182,11 @@
   <header>
     <h1>Neural Network Design: The Gradient Puzzle</h1>
     <p class="sub">
-      Baseline is trapped by pixel-wise MSE (identity/copycat). Student starts identical, but students must edit
-      <span class="badge">TODO-B</span> to switch the “rule of the game” to <b>sortedMSE</b> (distribution constraint) + smoothness + direction.
+      Baseline is trapped by pixel-wise MSE (copycat). Student uses the homework solution:
+      <span class="badge">sortedMSE</span> (distribution constraint) +
+      <span class="badge">smoothness</span> +
+      <span class="badge">direction</span>
+      to rearrange the same “inventory of colors” into a left→right gradient.
     </p>
   </header>
 
@@ -217,15 +213,15 @@
             </label>
             <label>
               <input type="radio" name="arch" value="transformation" />
-              <span>Transformation (TODO)</span>
+              <span>Transformation (implemented)</span>
             </label>
             <label>
               <input type="radio" name="arch" value="expansion" />
-              <span>Expansion (TODO)</span>
+              <span>Expansion (implemented)</span>
             </label>
 
             <p class="tiny" style="margin-top:8px">
-              Changing architecture rebuilds the student model only. (If a TODO arch is not implemented, it will log an error and revert.)
+              Architecture changes rebuild the student model only. Baseline stays fixed.
             </p>
           </div>
 
@@ -235,6 +231,9 @@
               <span class="badge" id="memBadge">tf.memory: —</span>
             </div>
             <p class="tiny" id="statusLine" style="margin:0">Step: — | Baseline loss: — | Student loss: —</p>
+            <p class="tiny" style="margin-top:8px">
+              Auto-train stops on plateau / max steps.
+            </p>
           </div>
         </div>
       </div>
@@ -256,7 +255,7 @@
           <canvas id="cvBase" width="16" height="16"></canvas>
         </div>
         <div class="viz">
-          <div class="label"><span>Student Output (initially MSE)</span><span class="badge">edit TODO-B</span></div>
+          <div class="label"><span>Student Output (sortedMSE + smooth + dir)</span><span class="badge">gradient</span></div>
           <canvas id="cvStudent" width="16" height="16"></canvas>
         </div>
       </div>
