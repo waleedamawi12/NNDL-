@@ -1,15 +1,14 @@
 // app.js
-// Stable “good looking” solution (matches your friend’s working idea):
-// - Baseline learns identity (MSE copy input)
-// - Student learns a target left->right gradient + optional chess texture + slight smoothness
+// “Looks-like-the-example” version (stable):
+// - Baseline: MSE(x, y) -> copycat noise.
+// - Student: learns an explicit left->right gradient + chess texture + mild smoothness.
+// - Adds Row Consistency loss to straighten the gradient (big visual improvement).
 //
 // Includes:
 // - Student architecture radios: compression/transformation/expansion
-// - Radio buttons for λSmooth, λDir, λDist (+ λChess bonus control)
+// - Radio buttons for λSmooth, λDir, λDist, λChess, λRow
 //
-// NOTE (important):
-// This produces the visual result you want reliably.
-// It is NOT the strict “rearrangement-only / sortedMSE” formulation.
+// NOTE: This is optimized for the visual target. It is not the strict “rearrangement-only/sortedMSE” solution.
 
 // -----------------------------------------------------------------------------
 // DOM helpers
@@ -31,22 +30,24 @@ const btnReset = $("#btnReset");
 const H = 16, W = 16;
 const SHAPE_4D = [1, H, W, 1];
 
-const STEPS_PER_FRAME = 25;      // fast convergence
+const STEPS_PER_FRAME = 25;
 const RENDER_EVERY = 1;
 const LOG_EVERY = 50;
 
 const BASE_LR = 1e-2;
 const STUDENT_LR = 1e-2;
 
-const AUTO_MAX_STEPS = 4000;
-const PLATEAU_PATIENCE = 900;
+const AUTO_MAX_STEPS = 4500;
+const PLATEAU_PATIENCE = 1000;
 const MIN_DELTA = 1e-8;
 
 // Loss weights (controlled by radios)
-let LAMBDA_SMOOTH = 0.02;  // like your friend’s
-let LAMBDA_DIR = 8.0;      // gradient strength
-let LAMBDA_DIST = 3.0;     // we map this to “chess strength” (acts like a distribution/texture control)
-let LAMBDA_CHESS = 3.0;    // extra knob (optional but helpful)
+// Good defaults for the “close but can be better” phase:
+let LAMBDA_SMOOTH = 0.015; // slightly less blur than 0.02
+let LAMBDA_DIR = 9.0;      // stronger gradient pull
+let LAMBDA_DIST = 2.0;     // mapped to texture strength (see studentLoss)
+let LAMBDA_CHESS = 2.5;    // chess/texture strength
+let LAMBDA_ROW = 0.5;      // straighten gradient across rows (0.2–0.8)
 
 // -----------------------------------------------------------------------------
 // State
@@ -71,7 +72,7 @@ let stepsSinceBest = 0;
 // Logging / UI
 function log(msg, kind = "info") {
   const prefix = kind === "error" ? "✖ " : kind === "ok" ? "✓ " : "• ";
-  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 7000);
+  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 8000);
 }
 function fmt(x) {
   if (x == null || Number.isNaN(x)) return "—";
@@ -107,11 +108,10 @@ function drawTensorToCanvas(t4d, canvas) {
 // -----------------------------------------------------------------------------
 // Loss pieces
 function mse(yTrue, yPred) {
-  // tf.losses.meanSquaredError returns shape [1,16,16,1] sometimes; mean() makes scalar
   return tf.mean(tf.losses.meanSquaredError(yTrue, yPred));
 }
 
-// Small smoothness: penalize horizontal + vertical differences
+// Smoothness: penalize horizontal + vertical differences
 function smoothness(yPred) {
   return tf.tidy(() => {
     const dx = yPred.slice([0, 0, 0, 0], [1, H, W - 1, 1])
@@ -122,22 +122,19 @@ function smoothness(yPred) {
   });
 }
 
-// Target gradient loss (this is what makes the output look “right”)
+// Target gradient loss: forces left->right gradient
 function gradientLoss(yPred) {
   return tf.tidy(() => {
-    // Build target gradient once per call (cheap at 16×16)
     const target = [];
     for (let i = 0; i < H; i++) {
-      for (let j = 0; j < W; j++) {
-        target.push(j / (W - 1)); // 0..1 left->right
-      }
+      for (let j = 0; j < W; j++) target.push(j / (W - 1));
     }
     const targetTensor = tf.tensor(target, [1, H, W, 1], "float32");
     return tf.mean(tf.square(tf.sub(targetTensor, yPred)));
   });
 }
 
-// Chess texture loss (neighbor-based)
+// Chess texture loss (neighbor-based): encourages checker-ish texture
 function chessNeighborLoss(yPred) {
   return tf.tidy(() => {
     const left = yPred.slice([0, 0, 0, 0], [1, H, W - 1, 1]);
@@ -156,6 +153,16 @@ function chessNeighborLoss(yPred) {
     const diagonalLoss = tf.mean(tf.square(diagonalDiff)).mul(tf.scalar(2));
 
     return horizontalLoss.add(verticalLoss).add(diagonalLoss).div(tf.scalar(3));
+  });
+}
+
+// Row consistency loss: makes each row follow the same column profile (straightens gradient)
+function rowConsistencyLoss(yPred) {
+  return tf.tidy(() => {
+    // mean over rows (axis=1) -> shape [1, W, 1] then reshape to [1,1,W,1]
+    const colMean = tf.mean(yPred, 1).reshape([1, 1, W, 1]);
+    const colMeanTile = colMean.tile([1, H, 1, 1]);
+    return tf.mean(tf.square(yPred.sub(colMeanTile)));
   });
 }
 
@@ -206,19 +213,28 @@ function baselineLoss(yTrue, yPred) {
 
 function studentLoss(yPred) {
   return tf.tidy(() => {
+    // Gradient term (main)
     const Lg = gradientLoss(yPred).mul(tf.scalar(LAMBDA_DIR));
-    const Lc = chessNeighborLoss(yPred).mul(tf.scalar(LAMBDA_CHESS));
+
+    // Texture (chess) term(s)
+    const chess = chessNeighborLoss(yPred);
+    const Lc = chess.mul(tf.scalar(LAMBDA_CHESS));
+
+    // “λDist” mapped to texture strength as requested (keeps the 3 knobs meaningful)
+    const Ld = chess.mul(tf.scalar(LAMBDA_DIST));
+
+    // Gentle smoothness
     const Ls = smoothness(yPred).mul(tf.scalar(LAMBDA_SMOOTH));
 
-    // We map “λDist” to texture strength as well (so your requested 3 knobs always matter)
-    const Ld = chessNeighborLoss(yPred).mul(tf.scalar(LAMBDA_DIST));
+    // Row-consistency to straighten gradient
+    const Lrow = rowConsistencyLoss(yPred).mul(tf.scalar(LAMBDA_ROW));
 
-    return Lg.add(Lc).add(Ls).add(Ld);
+    return tf.addN([Lg, Lc, Ld, Ls, Lrow]);
   });
 }
 
 // -----------------------------------------------------------------------------
-// Training step (correct TFJS gradients usage)
+// Training step
 async function trainOneStepReturnLosses() {
   let baseLossVal = NaN;
   let studentLossVal = NaN;
@@ -275,7 +291,10 @@ async function trainOneStepReturnLosses() {
   }
 
   // plateau tracking
-  const combo = (Number.isFinite(baseLossVal) ? baseLossVal : 0) + (Number.isFinite(studentLossVal) ? studentLossVal : 0);
+  const combo =
+    (Number.isFinite(baseLossVal) ? baseLossVal : 0) +
+    (Number.isFinite(studentLossVal) ? studentLossVal : 0);
+
   if (combo + MIN_DELTA < bestComboLoss) {
     bestComboLoss = combo;
     stepsSinceBest = 0;
@@ -397,14 +416,17 @@ function addLambdaControls() {
     <div id="lamDist" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
 
     <div class="tiny" style="margin: 0 0 6px;">λChess (extra texture knob)</div>
-    <div id="lamChess" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
+    <div id="lamChess" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
+
+    <div class="tiny" style="margin: 0 0 6px;">λRow (straighten gradient)</div>
+    <div id="lamRow" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
   `;
 
   panelBody.appendChild(wrap);
 
   function makeRadioRow(containerId, name, options, getVal, setVal) {
     const c = document.getElementById(containerId);
-    options.forEach((v, idx) => {
+    options.forEach((v) => {
       const label = document.createElement("label");
       label.style.display = "flex";
       label.style.alignItems = "center";
@@ -430,10 +452,11 @@ function addLambdaControls() {
     });
   }
 
-  makeRadioRow("lamSmooth", "lambdaSmooth", [0.0, 0.01, 0.02, 0.05], () => LAMBDA_SMOOTH, (v) => { LAMBDA_SMOOTH = v; });
-  makeRadioRow("lamDir", "lambdaDir", [4.0, 6.0, 8.0, 10.0], () => LAMBDA_DIR, (v) => { LAMBDA_DIR = v; });
-  makeRadioRow("lamDist", "lambdaDist", [0.0, 1.0, 3.0, 5.0], () => LAMBDA_DIST, (v) => { LAMBDA_DIST = v; });
-  makeRadioRow("lamChess", "lambdaChess", [0.0, 1.0, 3.0, 5.0], () => LAMBDA_CHESS, (v) => { LAMBDA_CHESS = v; });
+  makeRadioRow("lamSmooth", "lambdaSmooth", [0.0, 0.01, 0.015, 0.02, 0.05], () => LAMBDA_SMOOTH, (v) => { LAMBDA_SMOOTH = v; });
+  makeRadioRow("lamDir", "lambdaDir", [6.0, 8.0, 9.0, 10.0, 12.0], () => LAMBDA_DIR, (v) => { LAMBDA_DIR = v; });
+  makeRadioRow("lamDist", "lambdaDist", [0.0, 1.0, 2.0, 3.0, 5.0], () => LAMBDA_DIST, (v) => { LAMBDA_DIST = v; });
+  makeRadioRow("lamChess", "lambdaChess", [0.0, 1.0, 2.5, 3.0, 5.0], () => LAMBDA_CHESS, (v) => { LAMBDA_CHESS = v; });
+  makeRadioRow("lamRow", "lambdaRow", [0.0, 0.3, 0.5, 0.8, 1.2], () => LAMBDA_ROW, (v) => { LAMBDA_ROW = v; });
 }
 
 // -----------------------------------------------------------------------------
@@ -493,8 +516,8 @@ async function main() {
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-  log("Ready. Student optimizes gradient + chess + smoothness (stable visual result).", "ok");
-  log("Best recipe: Compression, λDir=8, λChess=3, λDist=3, λSmooth=0.02, then Auto Train.", "info");
+  log("Ready. Student optimizes gradient + chess + smooth + row-straightening.", "ok");
+  log("Best recipe: Compression, λDir=9, λRow=0.5, λChess=2.5, λDist=2, λSmooth=0.015, then Auto Train.", "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
