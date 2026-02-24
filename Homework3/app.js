@@ -1,9 +1,13 @@
 // app.js
-// Neural Network Design: The Gradient Puzzle (2-file version)
+// Neural Network Design: The Gradient Puzzle (TFJS, 2-file version)
 //
-// Fix: index.html loads THIS file as "app.js".
-// Baseline: pixel-wise MSE (copycat / stuck).
-// Student: sortedMSE (distribution constraint) + smoothness + direction (forms gradient).
+// FIXED for GitHub Pages / WebGL:
+// - tf.topk() has NO gradient in TFJS ("gradient function not found for TopK").
+// - So we replace sortedMSE(topk-sort) with a differentiable distribution constraint:
+//     CDF loss via soft-histogram (approx 1D Wasserstein / quantile match)
+//
+// Baseline: pixel-wise MSE only (copycat / stuck).
+// Student: cdfLoss (distribution) + smoothness + direction (forms gradient).
 
 // -----------------------------------------------------------------------------
 // DOM
@@ -39,9 +43,13 @@ const AUTO_MAX_STEPS = 5000;
 const PLATEAU_PATIENCE = 900;
 const MIN_DELTA = 1e-8;
 
-// Loss weights
-const LAMBDA_SMOOTH = 1.2; // try 0.5–2.5
-const LAMBDA_DIR = 2.2;    // try 1.0–4.0
+// Loss weights (tune if you want)
+const LAMBDA_SMOOTH = 2.0; // higher -> less checker/noise
+const LAMBDA_DIR = 2.0;    // higher -> stronger left->right bias
+
+// Distribution loss parameters (soft histogram)
+const DIST_BINS = 32;      // 16–64 typical
+const DIST_SIGMA = 0.03;   // 0.02 stricter, 0.05 smoother
 
 // -----------------------------------------------------------------------------
 // State
@@ -89,7 +97,7 @@ function drawTensorToCanvas(t4d, canvas) {
   const img = ctx.createImageData(W, H);
   const data = img.data;
 
-  const vals = t4d.dataSync(); // length 256
+  const vals = t4d.dataSync();
   for (let i = 0; i < H * W; i++) {
     const v01 = Math.max(0, Math.min(1, vals[i]));
     const v = Math.round(v01 * 255);
@@ -108,17 +116,28 @@ function mse(yTrue, yPred) {
   return tf.mean(tf.square(tf.sub(yTrue, yPred)));
 }
 
-function sortedMSE(yTrue, yPred) {
-  // MSE(sort(true), sort(pred)) using topk sort (descending).
+// Differentiable distribution constraint (no topk/sort):
+// Soft-histogram CDF loss ≈ 1D Wasserstein-ish distribution match
+function cdfLoss(yTrue, yPred, bins = 32, sigma = 0.03) {
   return tf.tidy(() => {
-    const a = yTrue.flatten();
-    const b = yPred.flatten();
-    const N = a.size;
+    const a = yTrue.flatten(); // [N]
+    const b = yPred.flatten(); // [N]
+    const centers = tf.linspace(0, 1, bins).reshape([1, bins]); // [1,B]
 
-    // topk is a practical way to sort 1D tensors in tfjs
-    const aSorted = tf.topk(a, N, true).values;
-    const bSorted = tf.topk(b, N, true).values;
-    return tf.mean(tf.square(tf.sub(aSorted, bSorted)));
+    function softHist(x) {
+      const x2d = x.reshape([-1, 1]); // [N,1]
+      const dist2 = tf.square(tf.sub(x2d, centers)); // [N,B]
+      const w = tf.exp(tf.mul(dist2, -1 / (2 * sigma * sigma))); // [N,B]
+      const hist = tf.sum(w, 0); // [B]
+      return tf.div(hist, tf.sum(hist)); // normalize
+    }
+
+    const ha = softHist(a);         // [B]
+    const hb = softHist(b);         // [B]
+    const cdfa = tf.cumsum(ha);     // [B]
+    const cdfb = tf.cumsum(hb);     // [B]
+
+    return tf.mean(tf.square(tf.sub(cdfa, cdfb)));
   });
 }
 
@@ -153,6 +172,7 @@ function createBaselineModel() {
   return tf.model({ inputs: inp, outputs: out, name: "baselineModel" });
 }
 
+// Projection types for student (all implemented)
 function createStudentModel(archType) {
   const inp = tf.input({ shape: [H, W, 1] });
 
@@ -166,6 +186,7 @@ function createStudentModel(archType) {
   }
 
   if (archType === "transformation") {
+    // Same spatial size: conv mixing + residual
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
@@ -177,6 +198,7 @@ function createStudentModel(archType) {
   }
 
   if (archType === "expansion") {
+    // Overcomplete: expand channels then project down
     let x = inp;
     x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
@@ -196,14 +218,15 @@ function baselineLoss(yTrue, yPred) {
 }
 
 function studentLoss(yTrue, yPred) {
-  // Homework solution:
-  // - sortedMSE keeps histogram
-  // - smoothness makes it locally consistent
-  // - direction makes it bright on the right
-  const Lsorted = sortedMSE(yTrue, yPred);
+  // FIXED: differentiable distribution matching (no TopK gradient issues)
+  const Ldist = cdfLoss(yTrue, yPred, DIST_BINS, DIST_SIGMA);
   const Lsmooth = smoothness(yPred);
   const Ldir = directionX(yPred);
-  return tf.addN([Lsorted, tf.mul(LAMBDA_SMOOTH, Lsmooth), tf.mul(LAMBDA_DIR, Ldir)]);
+  return tf.addN([
+    Ldist,
+    tf.mul(LAMBDA_SMOOTH, Lsmooth),
+    tf.mul(LAMBDA_DIR, Ldir),
+  ]);
 }
 
 // -----------------------------------------------------------------------------
@@ -261,7 +284,11 @@ async function trainOneStepReturnLosses() {
     log(String(err?.message || err), "error");
   }
 
-  const combo = (Number.isFinite(baseLossVal) ? baseLossVal : 0) + (Number.isFinite(studentLossVal) ? studentLossVal : 0);
+  // Plateau tracking (use combined score)
+  const combo =
+    (Number.isFinite(baseLossVal) ? baseLossVal : 0) +
+    (Number.isFinite(studentLossVal) ? studentLossVal : 0);
+
   if (combo + MIN_DELTA < bestComboLoss) {
     bestComboLoss = combo;
     stepsSinceBest = 0;
@@ -284,7 +311,6 @@ async function autoLoop() {
   for (let i = 0; i < STEPS_PER_FRAME; i++) {
     await trainOneStepReturnLosses();
     await tf.nextFrame();
-
     if (!autoRunning) return;
 
     if (stepCount >= AUTO_MAX_STEPS) {
@@ -329,8 +355,7 @@ function makeXCoordMask() {
 }
 
 function makeFixedNoiseInput() {
-  // fixed random seed isn’t exposed cleanly in TFJS without extra work,
-  // but we keep the SAME tensor for the whole run, so it is “fixed”.
+  // Not a seeded RNG, but we keep the SAME tensor for the whole run, so it is “fixed”.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
@@ -429,8 +454,10 @@ async function main() {
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-  log("Ready. Baseline is MSE-copycat. Student is Level-3 (sortedMSE + smooth + direction).", "ok");
+
+  log("Ready. Baseline is MSE-copycat. Student is (cdfLoss + smooth + direction).", "ok");
   log(`Loss weights: lambdaSmooth=${LAMBDA_SMOOTH}, lambdaDir=${LAMBDA_DIR}.`, "info");
+  log(`Dist params: bins=${DIST_BINS}, sigma=${DIST_SIGMA}.`, "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
