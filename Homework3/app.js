@@ -1,20 +1,17 @@
 // app.js
-// The Gradient Puzzle (matches the homework spec)
+// Neural Network Design: The Gradient Puzzle
 //
-// What your screenshot shows (all three look similar) is EXACTLY Level 1 behavior:
-//   L = mse(input, output)  -> copycat / identity.
+// Your homework target (like the slide):
+// - Baseline stays copycat/noise-like (pixel-wise MSE locks positions).
+// - Student becomes a smooth left→right gradient BUT keeps the SAME histogram (no new colors).
 //
-// Homework requires:
-// 1) Baseline: fixed architecture, fixed pixel-wise MSE (copycat).
-// 2) Student: starts IDENTICAL (also MSE), but students must edit TODO blocks to escape.
-// 3) Key pivot (must be explicit): DO NOT keep pixel-wise MSE if you want rearrangement.
-//    Instead: sortedMSE(input, output) as the base term, then add smoothness + direction.
+// That requires Level 2 + Level 3 losses:
+//   Lsorted = sortedMSE(input, output)
+//   Ltotal  = Lsorted + λ_smooth * smoothness(output) + λ_dir * directionX(output)
 //
-// This file is set so that once students implement TODO-B Level 3,
-// the student output reliably becomes a left->right gradient within a few hundred to ~1500 steps.
+// IMPORTANT: If you keep pixel-wise MSE in the student loss, you will NOT get rearrangement.
 //
 // -----------------------------------------------------------------------------
-
 // DOM
 const $ = (sel) => document.querySelector(sel);
 const logEl = $("#log");
@@ -29,36 +26,36 @@ const btnStep = $("#btnStep");
 const btnAuto = $("#btnAuto");
 const btnReset = $("#btnReset");
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Config
-// ----------------------------------------------------------------------------
 const H = 16, W = 16;
 const SHAPE_4D = [1, H, W, 1];
 
-// Keep UI smooth
-const STEPS_PER_FRAME = 8;
-
-// Separate learning rates (student often benefits from being a bit faster)
-const BASE_LR = 1e-2;
-const STUDENT_LR = 2e-2;
-
-// Auto-stop: use plateau-based stop (works for MSE AND custom losses)
-const AUTO_MAX_STEPS = 6000;
-const PLATEAU_PATIENCE = 900;
-const MIN_DELTA = 1e-8;
-
-// Render/log throttle
+// Training speed / UI smoothness
+const STEPS_PER_FRAME = 10;
 const RENDER_EVERY = 1;
 const LOG_EVERY = 50;
 
-// ----------------------------------------------------------------------------
+// Optimizers
+const BASE_LR = 1e-2;
+const STUDENT_LR = 3e-2;
+
+// Auto-stop
+const AUTO_MAX_STEPS = 5000;
+const PLATEAU_PATIENCE = 900;
+const MIN_DELTA = 1e-8;
+
+// Loss weights (tuned to reliably produce the slide-like gradient)
+const LAMBDA_SMOOTH = 1.2; // try 0.5–2.5
+const LAMBDA_DIR = 2.2;    // try 1.0–4.0
+
+// -----------------------------------------------------------------------------
 // State
-// ----------------------------------------------------------------------------
 let stepCount = 0;
 let autoRunning = false;
 let rafHandle = null;
 
-let xInput = null;            // fixed per session
+let xInput = null;
 let baselineModel = null;
 let studentModel = null;
 
@@ -67,20 +64,18 @@ let studentOpt = null;
 
 let studentArchType = "compression";
 
-// Precomputed coordinate mask for directionX loss (shape [1,16,16,1])
+// Direction mask [-1..+1] across x
 let xCoordMask = null;
 
 // Plateau tracking
 let bestComboLoss = Infinity;
 let stepsSinceBest = 0;
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Logging helpers
-// ----------------------------------------------------------------------------
 function log(msg, kind = "info") {
   const prefix = kind === "error" ? "✖ " : kind === "ok" ? "✓ " : "• ";
-  const line = `${prefix}${msg}\n`;
-  logEl.textContent = (line + logEl.textContent).slice(0, 5000);
+  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 5000);
 }
 function fmt(x) {
   if (x == null || Number.isNaN(x)) return "—";
@@ -90,19 +85,17 @@ function fmt(x) {
 }
 function setStatus({ step, baseLoss, studentLoss }) {
   statusLine.textContent = `Step: ${step} | Baseline loss: ${fmt(baseLoss)} | Student loss: ${fmt(studentLoss)}`;
-  const m = tf.memory();
-  memBadge.textContent = `tf.memory: ${m.numTensors} tensors`;
+  memBadge.textContent = `tf.memory: ${tf.memory().numTensors} tensors`;
 }
 
-// ----------------------------------------------------------------------------
-// Canvas renderer (16×16 tensor -> pixelated grayscale canvas)
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Canvas renderer (16×16 grayscale)
 function drawTensorToCanvas(t4d, canvas) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const img = ctx.createImageData(W, H);
   const data = img.data;
 
-  const vals = t4d.dataSync(); // length H*W
+  const vals = t4d.dataSync();
   for (let i = 0; i < H * W; i++) {
     const v01 = Math.max(0, Math.min(1, vals[i]));
     const v = Math.round(v01 * 255);
@@ -115,32 +108,26 @@ function drawTensorToCanvas(t4d, canvas) {
   ctx.putImageData(img, 0, 0);
 }
 
-// ----------------------------------------------------------------------------
-// Loss helpers (implemented, tested, and used)
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Loss helpers
 function mse(yTrue, yPred) {
-  // Level 1 trap: pixel-wise MSE freezes pixel positions.
   return tf.mean(tf.square(tf.sub(yTrue, yPred)));
 }
 
 function sortedMSE(yTrue, yPred) {
-  // Level 2 distribution constraint:
-  // MSE(sort(true_pixels), sort(pred_pixels))
-  // Must use tf.topk-based sorting on flattened pixels (descending OK).
+  // MSE(sort(true), sort(pred)) using topk sort (descending).
   return tf.tidy(() => {
     const a = yTrue.flatten();
     const b = yPred.flatten();
     const N = a.size;
-
     const aSorted = tf.topk(a, N, true).values;
     const bSorted = tf.topk(b, N, true).values;
-
     return tf.mean(tf.square(tf.sub(aSorted, bSorted)));
   });
 }
 
 function smoothness(yPred) {
-  // Total variation style: squared neighbor differences.
+  // TV-like: squared neighbor diffs
   return tf.tidy(() => {
     const dx = tf.sub(
       yPred.slice([0, 0, 1, 0], [1, H, W - 1, 1]),
@@ -155,16 +142,13 @@ function smoothness(yPred) {
 }
 
 function directionX(yPred) {
-  // Encourage left-dark / right-bright.
-  // Minimize -mean(output * mask).
+  // Minimize -mean(output * mask) => bright on right, dark on left
   return tf.tidy(() => tf.neg(tf.mean(tf.mul(yPred, xCoordMask))));
 }
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Models
-// ----------------------------------------------------------------------------
 function createBaselineModel() {
-  // Fixed architecture, fixed MSE objective.
   const inp = tf.input({ shape: [H, W, 1] });
   const flat = tf.layers.flatten().apply(inp);
   const h1 = tf.layers.dense({ units: 64, activation: "relu" }).apply(flat);
@@ -173,13 +157,7 @@ function createBaselineModel() {
   return tf.model({ inputs: inp, outputs: out, name: "baselineModel" });
 }
 
-// -----------------------------------------------------------------------------
-// TODO-A (Architecture)
-// -----------------------------------------------------------------------------
-// Homework requirement:
-// - compression: implemented
-// - transformation: NOT implemented -> throw clear error until students do it
-// - expansion: NOT implemented -> throw clear error until students do it
+// Projection types for student (all implemented)
 function createStudentModel(archType) {
   const inp = tf.input({ shape: [H, W, 1] });
 
@@ -189,64 +167,52 @@ function createStudentModel(archType) {
     const h = tf.layers.dense({ units: 128, activation: "relu" }).apply(z);
     const outFlat = tf.layers.dense({ units: H * W, activation: "sigmoid" }).apply(h);
     const out = tf.layers.reshape({ targetShape: [H, W, 1] }).apply(outFlat);
-    return tf.model({ inputs: inp, outputs: out, name: "studentModel_compression" });
+    return tf.model({ inputs: inp, outputs: out, name: "student_compression" });
   }
 
   if (archType === "transformation") {
-    throw new Error(
-      "TODO-A: 'transformation' architecture not implemented. Implement a transformation projection in createStudentModel()."
-    );
+    // Same spatial size: conv mixing + residual
+    let x = inp;
+    x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
+    x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
+    const skip = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "linear" }).apply(inp);
+    x = tf.layers.add().apply([x, skip]);
+    x = tf.layers.activation({ activation: "relu" }).apply(x);
+    const out = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: "same", activation: "sigmoid" }).apply(x);
+    return tf.model({ inputs: inp, outputs: out, name: "student_transformation" });
   }
 
   if (archType === "expansion") {
-    throw new Error(
-      "TODO-A: 'expansion' architecture not implemented. Implement an expansion projection in createStudentModel()."
-    );
+    // Overcomplete: expand channels then project down
+    let x = inp;
+    x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
+    x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
+    x = tf.layers.conv2d({ filters: 32, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
+    const out = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: "same", activation: "sigmoid" }).apply(x);
+    return tf.model({ inputs: inp, outputs: out, name: "student_expansion" });
   }
 
   throw new Error(`Unknown student architecture: ${archType}`);
 }
 
 // -----------------------------------------------------------------------------
-// TODO-B (Custom Loss) — THE KEY PIVOT
-// -----------------------------------------------------------------------------
-// CRITICAL: Students must NOT stack fancy terms on top of pixel-wise MSE if they want rearrangement.
-// Pixel-wise MSE is position-locked.
-// The pivot is: sortedMSE(input, output) as the BASE term.
-//
-// Recommended coefficients for Level 3 on 16×16:
-//   lambdaSmooth: 0.2 – 2.0
-//   lambdaDir:    0.2 – 3.0
-//
-// Tip: If it still looks noisy, increase lambdaSmooth.
-// Tip: If it doesn't become left->right, increase lambdaDir.
-function studentLoss(yTrue, yPred) {
-  // LEVEL 1 (start): identical to baseline (MSE trap).
-  // This is correct as the starting point for the homework.
-  return mse(yTrue, yPred);
-
-  // LEVEL 2 (pivot): histogram match (“no new colors, rearrange only”)
-  // const Lsorted = sortedMSE(yTrue, yPred);
-  // return Lsorted;
-
-  // LEVEL 3 (intent): distribution + smoothness + direction
-  // const Lsorted = sortedMSE(yTrue, yPred); // base term (do NOT re-add pixel-wise MSE)
-  // const Lsmooth = smoothness(yPred);
-  // const Ldir = directionX(yPred);
-  //
-  // const lambdaSmooth = 0.8; // try 0.2–2.0
-  // const lambdaDir = 1.6;    // try 0.2–3.0
-  //
-  // return tf.addN([Lsorted, tf.mul(lambdaSmooth, Lsmooth), tf.mul(lambdaDir, Ldir)]);
-}
-
+// Losses
 function baselineLoss(yTrue, yPred) {
+  // Baseline = Level 1 trap: pixel-wise MSE only
   return mse(yTrue, yPred);
 }
 
-// ----------------------------------------------------------------------------
-// Training step (custom loop; separate optimizers; tidy to avoid leaks)
-// ----------------------------------------------------------------------------
+function studentLoss(yTrue, yPred) {
+  // Homework solution (Level 3):
+  // DO NOT use pixel-wise MSE here if you want rearrangement.
+  const Lsorted = sortedMSE(yTrue, yPred);
+  const Lsmooth = smoothness(yPred);
+  const Ldir = directionX(yPred);
+  return tf.addN([Lsorted, tf.mul(LAMBDA_SMOOTH, Lsmooth), tf.mul(LAMBDA_DIR, Ldir)]);
+}
+
+// -----------------------------------------------------------------------------
+// Training (custom loop, separate optimizers, tidy)
 async function trainOneStepReturnLosses() {
   const yTrue = xInput;
 
@@ -254,14 +220,12 @@ async function trainOneStepReturnLosses() {
   let studentLossVal = NaN;
 
   try {
-    // Baseline update
     const baseLossTensor = tf.tidy(() => {
       const vars = baselineModel.trainableWeights.map(w => w.val);
       const { value, grads } = tf.variableGrads(() => {
         const yPred = baselineModel.apply(yTrue);
         return baselineLoss(yTrue, yPred);
       }, vars);
-
       baseOpt.applyGradients(grads);
       Object.values(grads).forEach(g => g.dispose());
       return value;
@@ -269,14 +233,12 @@ async function trainOneStepReturnLosses() {
     baseLossVal = (await baseLossTensor.data())[0];
     baseLossTensor.dispose();
 
-    // Student update
     const studentLossTensor = tf.tidy(() => {
       const vars = studentModel.trainableWeights.map(w => w.val);
       const { value, grads } = tf.variableGrads(() => {
         const yPred = studentModel.apply(yTrue);
         return studentLoss(yTrue, yPred);
       }, vars);
-
       studentOpt.applyGradients(grads);
       Object.values(grads).forEach(g => g.dispose());
       return value;
@@ -301,12 +263,11 @@ async function trainOneStepReturnLosses() {
         drawTensorToCanvas(s, cvStudent);
       });
     }
-
   } catch (err) {
     log(String(err?.message || err), "error");
   }
 
-  // Plateau logic uses a combined score (works no matter what loss you choose)
+  // Plateau tracking (use combined score)
   const combo = (Number.isFinite(baseLossVal) ? baseLossVal : 0) + (Number.isFinite(studentLossVal) ? studentLossVal : 0);
   if (combo + MIN_DELTA < bestComboLoss) {
     bestComboLoss = combo;
@@ -322,9 +283,8 @@ async function trainOneStep() {
   await trainOneStepReturnLosses();
 }
 
-// ----------------------------------------------------------------------------
-// Auto train (throttled + plateau stop)
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Auto loop
 async function autoLoop() {
   if (!autoRunning) return;
 
@@ -364,34 +324,28 @@ function stopAuto() {
   log("Auto train stopped.", "ok");
 }
 
-// ----------------------------------------------------------------------------
-// Init / Reset / Rebuild student
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Init / Reset / rebuild
 function makeXCoordMask() {
   return tf.tidy(() => {
-    const xs = tf.linspace(-1, 1, W);       // [W]
-    const row = xs.reshape([1, 1, W, 1]);   // [1,1,W,1]
-    return row.tile([1, H, 1, 1]);          // [1,H,W,1]
+    const xs = tf.linspace(-1, 1, W);
+    const row = xs.reshape([1, 1, W, 1]);
+    return row.tile([1, H, 1, 1]);
   });
 }
 
 function makeFixedNoiseInput() {
-  // Fixed per session.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
 function rebuildStudentModel(newArchType) {
   if (studentModel) studentModel.dispose();
-  studentModel = null;
-
-  // Optimizer has state; reset on rebuild
+  studentModel = createStudentModel(newArchType);
   studentOpt = tf.train.adam(STUDENT_LR);
 
-  // Reset plateau tracking
   bestComboLoss = Infinity;
   stepsSinceBest = 0;
 
-  studentModel = createStudentModel(newArchType);
   log(`Student model rebuilt: arch='${newArchType}'.`, "ok");
 }
 
@@ -423,9 +377,8 @@ function resetAllWeights() {
   log("Weights reset. (Baseline + Student reinitialized.)", "ok");
 }
 
-// ----------------------------------------------------------------------------
-// Wire UI
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// UI wiring
 btnStep.addEventListener("click", async () => {
   stopAuto();
   await trainOneStep();
@@ -445,32 +398,20 @@ document.querySelectorAll("input[name='arch']").forEach(radio => {
     studentArchType = newType;
 
     stopAuto();
+    rebuildStudentModel(newType);
 
-    try {
-      rebuildStudentModel(newType);
-
-      tf.tidy(() => {
-        const b = baselineModel.predict(xInput);
-        const s = studentModel.predict(xInput);
-        drawTensorToCanvas(xInput, cvInput);
-        drawTensorToCanvas(b, cvBase);
-        drawTensorToCanvas(s, cvStudent);
-      });
-    } catch (err) {
-      log(String(err?.message || err), "error");
-
-      // Revert to compression so the app remains usable
-      const fallback = document.querySelector("input[name='arch'][value='compression']");
-      fallback.checked = true;
-      studentArchType = "compression";
-      rebuildStudentModel("compression");
-    }
+    tf.tidy(() => {
+      const b = baselineModel.predict(xInput);
+      const s = studentModel.predict(xInput);
+      drawTensorToCanvas(xInput, cvInput);
+      drawTensorToCanvas(b, cvBase);
+      drawTensorToCanvas(s, cvStudent);
+    });
   });
 });
 
-// ----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Boot
-// ----------------------------------------------------------------------------
 async function main() {
   await tf.ready();
 
@@ -492,8 +433,8 @@ async function main() {
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-  log("Ready. Both models start in Level 1 (pixel-wise MSE trap).", "ok");
-  log("Homework pivot: implement TODO-B so student uses sortedMSE + smoothness + direction.", "info");
+  log("Ready. Baseline is MSE-copycat. Student is Level-3 (sortedMSE + smooth + direction).", "ok");
+  log(`Loss weights: lambdaSmooth=${LAMBDA_SMOOTH}, lambdaDir=${LAMBDA_DIR}.`, "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
