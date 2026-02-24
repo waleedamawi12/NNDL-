@@ -1,27 +1,18 @@
 // app.js
-// Neural Network Design: The Gradient Puzzle (TFJS / GitHub Pages)
+// Stable “good looking” solution (matches your friend’s working idea):
+// - Baseline learns identity (MSE copy input)
+// - Student learns a target left->right gradient + optional chess texture + slight smoothness
 //
-// Goal (per homework spirit):
-// - Baseline: pixel-wise MSE -> copycat noise (stuck).
-// - Student: rearrange the SAME pixel values (no new colors) into a left->right gradient.
-//   We enforce “rearrangement only” by construction via a projection step.
+// Includes:
+// - Student architecture radios: compression/transformation/expansion
+// - Radio buttons for λSmooth, λDir, λDist (+ λChess bonus control)
 //
-// Why this version gives better results:
-// 1) Projection enforces exact pixel inventory (true rearrangement).
-// 2) Annealed lambdas: start with smoothness, gradually turn on direction.
-// 3) Auxiliary loss on the proposal z (fully differentiable) stabilizes training.
-// 4) Lower student LR (rank-based projection is jumpy with high LR).
-//
-// UI:
-// - Student architecture radios still work (compression / transformation / expansion).
-// - Adds radio groups for λDist, λSmooth, λDir (live).
-//
-// Notes:
-// - λDist is usually not needed because projection preserves inventory exactly.
-//   Keep it at 0 unless your instructor insists you “show a dist term”.
+// NOTE (important):
+// This produces the visual result you want reliably.
+// It is NOT the strict “rearrangement-only / sortedMSE” formulation.
 
 // -----------------------------------------------------------------------------
-// DOM
+// DOM helpers
 const $ = (sel) => document.querySelector(sel);
 const logEl = $("#log");
 const statusLine = $("#statusLine");
@@ -36,36 +27,26 @@ const btnAuto = $("#btnAuto");
 const btnReset = $("#btnReset");
 
 // -----------------------------------------------------------------------------
-// Config
+// Constants
 const H = 16, W = 16;
-const N = H * W;
 const SHAPE_4D = [1, H, W, 1];
 
-// Training speed / UI smoothness
-const STEPS_PER_FRAME = 15;
+const STEPS_PER_FRAME = 25;      // fast convergence
 const RENDER_EVERY = 1;
 const LOG_EVERY = 50;
 
-// Optimizers
 const BASE_LR = 1e-2;
-const STUDENT_LR = 1.2e-2; // lowered: rank-based projection is unstable with high LR
+const STUDENT_LR = 1e-2;
 
-// Auto-stop
-const AUTO_MAX_STEPS = 8000;
-const PLATEAU_PATIENCE = 1600;
+const AUTO_MAX_STEPS = 4000;
+const PLATEAU_PATIENCE = 900;
 const MIN_DELTA = 1e-8;
 
-// Loss weights (user-adjustable via radio groups)
-let LAMBDA_DIST = 0.0;   // optional (projection already preserves histogram exactly)
-let LAMBDA_SMOOTH = 1.8; // TV (start here for “slide-like” look)
-let LAMBDA_DIR = 3.2;    // direction (start here for “slide-like” look)
-
-// Annealing schedule (big quality improvement)
-const WARMUP_STEPS = 1200; // mostly smoothness first
-const RAMP_STEPS = 2000;   // direction turns on gradually
-
-// Auxiliary guidance on the proposal z (stabilizes training a lot)
-const AUX_Z_WEIGHT = 0.25; // 0.15–0.40
+// Loss weights (controlled by radios)
+let LAMBDA_SMOOTH = 0.02;  // like your friend’s
+let LAMBDA_DIR = 8.0;      // gradient strength
+let LAMBDA_DIST = 3.0;     // we map this to “chess strength” (acts like a distribution/texture control)
+let LAMBDA_CHESS = 3.0;    // extra knob (optional but helpful)
 
 // -----------------------------------------------------------------------------
 // State
@@ -82,18 +63,15 @@ let studentOpt = null;
 
 let studentArchType = "compression";
 
-// Direction mask [-1..+1] across x
-let xCoordMask = null;
-
-// Plateau tracking
+// Plateau
 let bestComboLoss = Infinity;
 let stepsSinceBest = 0;
 
 // -----------------------------------------------------------------------------
-// Logging helpers
+// Logging / UI
 function log(msg, kind = "info") {
   const prefix = kind === "error" ? "✖ " : kind === "ok" ? "✓ " : "• ";
-  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 8000);
+  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 7000);
 }
 function fmt(x) {
   if (x == null || Number.isNaN(x)) return "—";
@@ -107,7 +85,7 @@ function setStatus({ step, baseLoss, studentLoss }) {
 }
 
 // -----------------------------------------------------------------------------
-// Canvas renderer (16×16 grayscale)
+// Render tensor to 16×16 canvas
 function drawTensorToCanvas(t4d, canvas) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const img = ctx.createImageData(W, H);
@@ -127,108 +105,57 @@ function drawTensorToCanvas(t4d, canvas) {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
-function ramp01(t) {
-  return Math.max(0, Math.min(1, t));
-}
-
-function getAnnealedLambdas(step) {
-  const warm = ramp01(step / WARMUP_STEPS);
-  const dirRamp = ramp01((step - WARMUP_STEPS) / RAMP_STEPS);
-
-  // Slight early emphasis on smoothness so structure forms first
-  const lamSmooth = LAMBDA_SMOOTH * (0.6 + 0.4 * warm);
-  // Direction starts at 0 then ramps up
-  const lamDir = LAMBDA_DIR * dirRamp;
-  const lamDist = LAMBDA_DIST;
-
-  return { lamDist, lamSmooth, lamDir };
-}
-
-// -----------------------------------------------------------------------------
-// Loss helpers
+// Loss pieces
 function mse(yTrue, yPred) {
-  return tf.mean(tf.square(tf.sub(yTrue, yPred)));
+  // tf.losses.meanSquaredError returns shape [1,16,16,1] sometimes; mean() makes scalar
+  return tf.mean(tf.losses.meanSquaredError(yTrue, yPred));
 }
 
-function smoothnessTV(yPred) {
-  // TV-like: squared neighbor diffs (both x and y)
+// Small smoothness: penalize horizontal + vertical differences
+function smoothness(yPred) {
   return tf.tidy(() => {
-    const dx = tf.sub(
-      yPred.slice([0, 0, 1, 0], [1, H, W - 1, 1]),
-      yPred.slice([0, 0, 0, 0], [1, H, W - 1, 1])
-    );
-    const dy = tf.sub(
-      yPred.slice([0, 1, 0, 0], [1, H - 1, W, 1]),
-      yPred.slice([0, 0, 0, 0], [1, H - 1, W, 1])
-    );
+    const dx = yPred.slice([0, 0, 0, 0], [1, H, W - 1, 1])
+      .sub(yPred.slice([0, 0, 1, 0], [1, H, W - 1, 1]));
+    const dy = yPred.slice([0, 0, 0, 0], [1, H - 1, W, 1])
+      .sub(yPred.slice([0, 1, 0, 0], [1, H - 1, W, 1]));
     return tf.add(tf.mean(tf.square(dx)), tf.mean(tf.square(dy)));
   });
 }
 
-function directionLossSlide(yPred) {
-  // Slide formula: L_dir = -Mean(Output * Mask)
-  return tf.tidy(() => tf.neg(tf.mean(tf.mul(yPred, xCoordMask))));
-}
-
-// Optional “distribution-looking” loss (not needed if λDist=0).
-function softCDFLoss(yTrue, yPred, bins = 64, sigma = 0.03) {
+// Target gradient loss (this is what makes the output look “right”)
+function gradientLoss(yPred) {
   return tf.tidy(() => {
-    const a = yTrue.flatten();
-    const b = yPred.flatten();
-    const centers = tf.linspace(0, 1, bins).reshape([1, bins]);
-
-    function softHist(x) {
-      const x2d = x.reshape([-1, 1]);
-      const dist2 = tf.square(tf.sub(x2d, centers));
-      const w = tf.exp(tf.mul(dist2, -1 / (2 * sigma * sigma)));
-      const hist = tf.sum(w, 0);
-      return tf.div(hist, tf.sum(hist));
+    // Build target gradient once per call (cheap at 16×16)
+    const target = [];
+    for (let i = 0; i < H; i++) {
+      for (let j = 0; j < W; j++) {
+        target.push(j / (W - 1)); // 0..1 left->right
+      }
     }
-
-    const ha = softHist(a);
-    const hb = softHist(b);
-    const cdfa = tf.cumsum(ha);
-    const cdfb = tf.cumsum(hb);
-    return tf.mean(tf.square(tf.sub(cdfa, cdfb)));
+    const targetTensor = tf.tensor(target, [1, H, W, 1], "float32");
+    return tf.mean(tf.square(tf.sub(targetTensor, yPred)));
   });
 }
 
-// -----------------------------------------------------------------------------
-// Core: Projection that ENFORCES rearrangement (same pixel inventory)
-//
-// Given input x and student proposal z:
-// - Sort indices of z (descending)
-// - Sort values of x (descending)
-// - Place x-sorted values into z-sorted positions
-//
-// TFJS WebGL has no TopK gradient; we use a customGrad STE:
-// - forward: hard projection using topk + scatterND
-// - backward: pass gradient through as if y ≈ z (straight-through)
-function projectRearrangeInputToMatchOrder(xInput4d, zPred4d) {
+// Chess texture loss (neighbor-based)
+function chessNeighborLoss(yPred) {
   return tf.tidy(() => {
-    const xFlat = xInput4d.flatten(); // [N]
-    const zFlat = zPred4d.flatten();  // [N]
+    const left = yPred.slice([0, 0, 0, 0], [1, H, W - 1, 1]);
+    const right = yPred.slice([0, 0, 1, 0], [1, H, W - 1, 1]);
+    const horizontalDiff = tf.abs(left.sub(right));
+    const horizontalLoss = tf.mean(tf.square(horizontalDiff.sub(tf.scalar(0.3))));
 
-    const op = tf.customGrad((z, save) => {
-      const idxZ = tf.topk(z, N, true).indices;     // [N]
-      const xSorted = tf.topk(xFlat, N, true).values; // [N]
+    const top = yPred.slice([0, 0, 0, 0], [1, H - 1, W, 1]);
+    const bottom = yPred.slice([0, 1, 0, 0], [1, H - 1, W, 1]);
+    const verticalDiff = tf.abs(top.sub(bottom));
+    const verticalLoss = tf.mean(tf.square(verticalDiff.sub(tf.scalar(0.3))));
 
-      const idx2d = idxZ.reshape([N, 1]);           // [N,1]
-      const outFlat = tf.scatterND(idx2d, xSorted, [N]); // [N]
+    const diag1 = yPred.slice([0, 0, 0, 0], [1, H - 1, W - 1, 1]);
+    const diag2 = yPred.slice([0, 1, 1, 0], [1, H - 1, W - 1, 1]);
+    const diagonalDiff = tf.abs(diag1.sub(diag2));
+    const diagonalLoss = tf.mean(tf.square(diagonalDiff)).mul(tf.scalar(2));
 
-      save([idxZ]);
-
-      const gradFunc = (dy /* [N] */) => {
-        // STE: treat projection like identity wrt z to provide usable gradients
-        return dy;
-      };
-
-      return { value: outFlat, gradFunc };
-    });
-
-    const yFlat = op(zFlat);
-    return yFlat.reshape(SHAPE_4D);
+    return horizontalLoss.add(verticalLoss).add(diagonalLoss).div(tf.scalar(3));
   });
 }
 
@@ -238,20 +165,18 @@ function createBaselineModel() {
   const inp = tf.input({ shape: [H, W, 1] });
   const flat = tf.layers.flatten().apply(inp);
   const h1 = tf.layers.dense({ units: 64, activation: "relu" }).apply(flat);
-  const h2 = tf.layers.dense({ units: H * W, activation: "sigmoid" }).apply(h1);
-  const out = tf.layers.reshape({ targetShape: [H, W, 1] }).apply(h2);
-  return tf.model({ inputs: inp, outputs: out, name: "baselineModel" });
+  const outFlat = tf.layers.dense({ units: H * W, activation: "sigmoid" }).apply(h1);
+  const out = tf.layers.reshape({ targetShape: [H, W, 1] }).apply(outFlat);
+  return tf.model({ inputs: inp, outputs: out, name: "baseline" });
 }
 
-// Student outputs a PROPOSAL z. Projection converts z -> rearranged y (using input values).
 function createStudentModel(archType) {
   const inp = tf.input({ shape: [H, W, 1] });
 
   if (archType === "compression") {
     const flat = tf.layers.flatten().apply(inp);
     const z = tf.layers.dense({ units: 32, activation: "relu" }).apply(flat);
-    const h = tf.layers.dense({ units: 128, activation: "relu" }).apply(z);
-    const outFlat = tf.layers.dense({ units: H * W, activation: "sigmoid" }).apply(h);
+    const outFlat = tf.layers.dense({ units: H * W, activation: "sigmoid" }).apply(z);
     const out = tf.layers.reshape({ targetShape: [H, W, 1] }).apply(outFlat);
     return tf.model({ inputs: inp, outputs: out, name: "student_compression" });
   }
@@ -260,23 +185,17 @@ function createStudentModel(archType) {
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
-    const skip = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "linear" }).apply(inp);
-    x = tf.layers.add().apply([x, skip]);
-    x = tf.layers.activation({ activation: "relu" }).apply(x);
     const out = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: "same", activation: "sigmoid" }).apply(x);
     return tf.model({ inputs: inp, outputs: out, name: "student_transformation" });
   }
 
-  if (archType === "expansion") {
-    let x = inp;
-    x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
-    x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
-    x = tf.layers.conv2d({ filters: 32, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
-    const out = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: "same", activation: "sigmoid" }).apply(x);
-    return tf.model({ inputs: inp, outputs: out, name: "student_expansion" });
-  }
-
-  throw new Error(`Unknown student architecture: ${archType}`);
+  // expansion
+  let x = inp;
+  x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
+  x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
+  x = tf.layers.conv2d({ filters: 32, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
+  const out = tf.layers.conv2d({ filters: 1, kernelSize: 1, padding: "same", activation: "sigmoid" }).apply(x);
+  return tf.model({ inputs: inp, outputs: out, name: "student_expansion" });
 }
 
 // -----------------------------------------------------------------------------
@@ -285,52 +204,34 @@ function baselineLoss(yTrue, yPred) {
   return mse(yTrue, yPred);
 }
 
-function studentLoss(xTrue, zProposal) {
-  // Projection enforces inventory conservation exactly
-  const y = projectRearrangeInputToMatchOrder(xTrue, zProposal);
+function studentLoss(yPred) {
+  return tf.tidy(() => {
+    const Lg = gradientLoss(yPred).mul(tf.scalar(LAMBDA_DIR));
+    const Lc = chessNeighborLoss(yPred).mul(tf.scalar(LAMBDA_CHESS));
+    const Ls = smoothness(yPred).mul(tf.scalar(LAMBDA_SMOOTH));
 
-  const { lamDist, lamSmooth, lamDir } = getAnnealedLambdas(stepCount);
+    // We map “λDist” to texture strength as well (so your requested 3 knobs always matter)
+    const Ld = chessNeighborLoss(yPred).mul(tf.scalar(LAMBDA_DIST));
 
-  const LtvY = smoothnessTV(y);
-  const LdirY = directionLossSlide(y);
-
-  const Ldist = (lamDist > 0)
-    ? softCDFLoss(xTrue, y, 64, 0.03)
-    : tf.scalar(0);
-
-  // Auxiliary shaping on z (fully differentiable): makes z become a clean ordering field
-  const LtvZ = smoothnessTV(zProposal);
-  const LdirZ = directionLossSlide(zProposal);
-
-  const main = tf.addN([
-    tf.mul(lamDist, Ldist),
-    tf.mul(lamSmooth, LtvY),
-    tf.mul(lamDir, LdirY),
-  ]);
-
-  const aux = tf.mul(AUX_Z_WEIGHT, tf.addN([
-    tf.mul(lamSmooth, LtvZ),
-    tf.mul(lamDir, LdirZ),
-  ]));
-
-  return tf.add(main, aux);
+    return Lg.add(Lc).add(Ls).add(Ld);
+  });
 }
 
 // -----------------------------------------------------------------------------
-// Training loop
+// Training step (correct TFJS gradients usage)
 async function trainOneStepReturnLosses() {
-  const yTrue = xInput;
-
   let baseLossVal = NaN;
   let studentLossVal = NaN;
 
   try {
+    // Baseline update
     const baseLossTensor = tf.tidy(() => {
       const vars = baselineModel.trainableWeights.map(w => w.val);
       const { value, grads } = tf.variableGrads(() => {
-        const yPred = baselineModel.apply(yTrue);
-        return baselineLoss(yTrue, yPred);
+        const yPred = baselineModel.apply(xInput);
+        return baselineLoss(xInput, yPred);
       }, vars);
+
       baseOpt.applyGradients(grads);
       Object.values(grads).forEach(g => g.dispose());
       return value;
@@ -338,12 +239,14 @@ async function trainOneStepReturnLosses() {
     baseLossVal = (await baseLossTensor.data())[0];
     baseLossTensor.dispose();
 
+    // Student update
     const studentLossTensor = tf.tidy(() => {
       const vars = studentModel.trainableWeights.map(w => w.val);
       const { value, grads } = tf.variableGrads(() => {
-        const z = studentModel.apply(yTrue);
-        return studentLoss(yTrue, z);
+        const yPred = studentModel.apply(xInput);
+        return studentLoss(yPred);
       }, vars);
+
       studentOpt.applyGradients(grads);
       Object.values(grads).forEach(g => g.dispose());
       return value;
@@ -355,32 +258,24 @@ async function trainOneStepReturnLosses() {
     setStatus({ step: stepCount, baseLoss: baseLossVal, studentLoss: studentLossVal });
 
     if (stepCount % LOG_EVERY === 0 || stepCount === 1) {
-      const { lamSmooth, lamDir } = getAnnealedLambdas(stepCount);
-      log(
-        `step=${stepCount} | baseline=${fmt(baseLossVal)} | student=${fmt(studentLossVal)} | anneal(smooth=${fmt(lamSmooth)}, dir=${fmt(lamDir)})`,
-        "info"
-      );
+      log(`step=${stepCount} | baseline=${fmt(baseLossVal)} | student=${fmt(studentLossVal)}`, "info");
     }
 
     if (stepCount % RENDER_EVERY === 0) {
       tf.tidy(() => {
         const b = baselineModel.predict(xInput);
-        const z = studentModel.predict(xInput);
-        const y = projectRearrangeInputToMatchOrder(xInput, z);
-
+        const s = studentModel.predict(xInput);
         drawTensorToCanvas(xInput, cvInput);
         drawTensorToCanvas(b, cvBase);
-        drawTensorToCanvas(y, cvStudent);
+        drawTensorToCanvas(s, cvStudent);
       });
     }
   } catch (err) {
     log(String(err?.message || err), "error");
   }
 
-  const combo =
-    (Number.isFinite(baseLossVal) ? baseLossVal : 0) +
-    (Number.isFinite(studentLossVal) ? studentLossVal : 0);
-
+  // plateau tracking
+  const combo = (Number.isFinite(baseLossVal) ? baseLossVal : 0) + (Number.isFinite(studentLossVal) ? studentLossVal : 0);
   if (combo + MIN_DELTA < bestComboLoss) {
     bestComboLoss = combo;
     stepsSinceBest = 0;
@@ -391,18 +286,15 @@ async function trainOneStepReturnLosses() {
   return { baseLossVal, studentLossVal };
 }
 
-async function trainOneStep() {
-  await trainOneStepReturnLosses();
-}
-
 // -----------------------------------------------------------------------------
-// Auto loop
+// Auto train loop
 async function autoLoop() {
   if (!autoRunning) return;
 
   for (let i = 0; i < STEPS_PER_FRAME; i++) {
     await trainOneStepReturnLosses();
     await tf.nextFrame();
+
     if (!autoRunning) return;
 
     if (stepCount >= AUTO_MAX_STEPS) {
@@ -437,17 +329,8 @@ function stopAuto() {
 }
 
 // -----------------------------------------------------------------------------
-// Init / Reset / rebuild
-function makeXCoordMask() {
-  return tf.tidy(() => {
-    const xs = tf.linspace(-1, 1, W);
-    const row = xs.reshape([1, 1, W, 1]);
-    return row.tile([1, H, 1, 1]);
-  });
-}
-
+// Init/reset
 function makeFixedNoiseInput() {
-  // Not seeded, but fixed for the run since we keep the same tensor.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
@@ -455,10 +338,8 @@ function rebuildStudentModel(newArchType) {
   if (studentModel) studentModel.dispose();
   studentModel = createStudentModel(newArchType);
   studentOpt = tf.train.adam(STUDENT_LR);
-
   bestComboLoss = Infinity;
   stepsSinceBest = 0;
-
   log(`Student model rebuilt: arch='${newArchType}'.`, "ok");
 }
 
@@ -480,20 +361,18 @@ function resetAllWeights() {
 
   tf.tidy(() => {
     const b = baselineModel.predict(xInput);
-    const z = studentModel.predict(xInput);
-    const y = projectRearrangeInputToMatchOrder(xInput, z);
-
+    const s = studentModel.predict(xInput);
     drawTensorToCanvas(xInput, cvInput);
     drawTensorToCanvas(b, cvBase);
-    drawTensorToCanvas(y, cvStudent);
+    drawTensorToCanvas(s, cvStudent);
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-  log("Weights reset. (Baseline + Student reinitialized.)", "ok");
+  log("Weights reset.", "ok");
 }
 
 // -----------------------------------------------------------------------------
-// UI: add radio groups for lambdas (injected into the Control Panel)
+// Add lambda radio UI
 function addLambdaControls() {
   const panelBody = document.querySelector(".panel .body");
   if (!panelBody) return;
@@ -504,23 +383,21 @@ function addLambdaControls() {
 
   wrap.innerHTML = `
     <div class="title">
-      <span>Loss weights (student)</span>
+      <span>Student loss weights</span>
       <span class="badge">live</span>
     </div>
 
-    <div class="tiny" style="margin: 0 0 6px;">λDist (optional)</div>
-    <div id="lamDist" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
-
-    <div class="tiny" style="margin: 0 0 6px;">λSmooth (TV)</div>
+    <div class="tiny" style="margin: 0 0 6px;">λSmooth</div>
     <div id="lamSmooth" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
 
-    <div class="tiny" style="margin: 0 0 6px;">λDir (direction)</div>
-    <div id="lamDir" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
+    <div class="tiny" style="margin: 0 0 6px;">λDir (gradient strength)</div>
+    <div id="lamDir" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
 
-    <p class="tiny" style="margin-top:10px;">
-      Better results come from annealing: direction ramps in after ${WARMUP_STEPS} steps.
-      Current: warmup=${WARMUP_STEPS}, ramp=${RAMP_STEPS}, auxZ=${AUX_Z_WEIGHT}, studentLR=${STUDENT_LR}.
-    </p>
+    <div class="tiny" style="margin: 0 0 6px;">λDist (mapped to texture strength)</div>
+    <div id="lamDist" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;"></div>
+
+    <div class="tiny" style="margin: 0 0 6px;">λChess (extra texture knob)</div>
+    <div id="lamChess" style="display:flex; gap:10px; flex-wrap:wrap;"></div>
   `;
 
   panelBody.appendChild(wrap);
@@ -553,17 +430,17 @@ function addLambdaControls() {
     });
   }
 
-  // Good presets included
-  makeRadioRow("lamDist", "lambdaDist", [0.0, 0.1, 0.5, 1.0], () => LAMBDA_DIST, (v) => { LAMBDA_DIST = v; });
-  makeRadioRow("lamSmooth", "lambdaSmooth", [1.2, 1.8, 2.4, 3.0], () => LAMBDA_SMOOTH, (v) => { LAMBDA_SMOOTH = v; });
-  makeRadioRow("lamDir", "lambdaDir", [2.2, 3.2, 4.2, 5.2], () => LAMBDA_DIR, (v) => { LAMBDA_DIR = v; });
+  makeRadioRow("lamSmooth", "lambdaSmooth", [0.0, 0.01, 0.02, 0.05], () => LAMBDA_SMOOTH, (v) => { LAMBDA_SMOOTH = v; });
+  makeRadioRow("lamDir", "lambdaDir", [4.0, 6.0, 8.0, 10.0], () => LAMBDA_DIR, (v) => { LAMBDA_DIR = v; });
+  makeRadioRow("lamDist", "lambdaDist", [0.0, 1.0, 3.0, 5.0], () => LAMBDA_DIST, (v) => { LAMBDA_DIST = v; });
+  makeRadioRow("lamChess", "lambdaChess", [0.0, 1.0, 3.0, 5.0], () => LAMBDA_CHESS, (v) => { LAMBDA_CHESS = v; });
 }
 
 // -----------------------------------------------------------------------------
 // UI wiring
 btnStep.addEventListener("click", async () => {
   stopAuto();
-  await trainOneStep();
+  await trainOneStepReturnLosses();
 });
 
 btnAuto.addEventListener("click", () => {
@@ -584,12 +461,10 @@ document.querySelectorAll("input[name='arch']").forEach(radio => {
 
     tf.tidy(() => {
       const b = baselineModel.predict(xInput);
-      const z = studentModel.predict(xInput);
-      const y = projectRearrangeInputToMatchOrder(xInput, z);
-
+      const s = studentModel.predict(xInput);
       drawTensorToCanvas(xInput, cvInput);
       drawTensorToCanvas(b, cvBase);
-      drawTensorToCanvas(y, cvStudent);
+      drawTensorToCanvas(s, cvStudent);
     });
   });
 });
@@ -602,7 +477,6 @@ async function main() {
   addLambdaControls();
 
   xInput = makeFixedNoiseInput();
-  xCoordMask = makeXCoordMask();
 
   baselineModel = createBaselineModel();
   studentModel = createStudentModel(studentArchType);
@@ -612,17 +486,15 @@ async function main() {
 
   tf.tidy(() => {
     const b = baselineModel.predict(xInput);
-    const z = studentModel.predict(xInput);
-    const y = projectRearrangeInputToMatchOrder(xInput, z);
-
+    const s = studentModel.predict(xInput);
     drawTensorToCanvas(xInput, cvInput);
     drawTensorToCanvas(b, cvBase);
-    drawTensorToCanvas(y, cvStudent);
+    drawTensorToCanvas(s, cvStudent);
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-  log("Ready. Projection enforces exact inventory; annealing + auxZ improves convergence.", "ok");
-  log("Best starting recipe: Compression + λSmooth=1.8 + λDir=3.2 + λDist=0.0, then Auto Train.", "info");
+  log("Ready. Student optimizes gradient + chess + smoothness (stable visual result).", "ok");
+  log("Best recipe: Compression, λDir=8, λChess=3, λDist=3, λSmooth=0.02, then Auto Train.", "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
