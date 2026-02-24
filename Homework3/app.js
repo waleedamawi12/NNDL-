@@ -1,19 +1,19 @@
 // app.js
-// Neural Network Design: The Gradient Puzzle (TFJS / GitHub Pages friendly)
+// Neural Network Design: The Gradient Puzzle (TFJS / GitHub Pages)
 //
-// Goal:
-// - Baseline: pixel-wise MSE => copycat noise.
-// - Student: rearranges same "inventory of colors" into a left->right gradient.
+// Matches the homework slide intent:
+// Level 2: MSE(Sort(Input), Sort(Output))
+// Level 3: + Smoothness (TV) + Direction: L_dir = -Mean(Output * Mask)
+// :contentReference[oaicite:1]{index=1}
 //
-// IMPORTANT FIX:
-// - Do NOT use tf.topk() for "sorting": TFJS WebGL has no gradient for TopK.
-// - Instead, use a differentiable distribution constraint:
-//   soft-histogram CDF loss (approx 1D Wasserstein / quantile match).
+// IMPORTANT: tf.topk/sort has no gradient in TFJS WebGL.
+// So we use a differentiable sorting approximation (SoftSort / NeuralSort-style).
 //
-// Also IMPORTANT:
-// - A naive direction loss (-mean(y*mask)) encourages saturation (step function).
-// - We use correlation-based direction loss to encourage a true gradient.
-//
+// Expected outcome:
+// - Baseline: pixel-wise MSE => copycat noise-like output.
+// - Student: same "inventory of colors" (distribution preserved) rearranged into left→right gradient,
+//   with a mild checker texture possible (like the demo/slide).
+
 // -----------------------------------------------------------------------------
 // DOM
 const $ = (sel) => document.querySelector(sel);
@@ -35,7 +35,7 @@ const H = 16, W = 16;
 const SHAPE_4D = [1, H, W, 1];
 
 // Training speed / UI smoothness
-const STEPS_PER_FRAME = 10;
+const STEPS_PER_FRAME = 5;   // softsort is heavier than simple losses
 const RENDER_EVERY = 1;
 const LOG_EVERY = 50;
 
@@ -44,18 +44,18 @@ const BASE_LR = 1e-2;
 const STUDENT_LR = 3e-2;
 
 // Auto-stop
-const AUTO_MAX_STEPS = 6000;
-const PLATEAU_PATIENCE = 1200;
+const AUTO_MAX_STEPS = 7000;
+const PLATEAU_PATIENCE = 1400;
 const MIN_DELTA = 1e-8;
 
-// Loss weights (tuned to produce a smooth ramp like your target image)
-const LAMBDA_DIST = 10.0;  // distribution/histogram match (strong)
-const LAMBDA_SMOOTH = 1.4; // smoothness (moderate, allows mild texture)
-const LAMBDA_DIR = 1.6;    // direction (moderate; correlation-based avoids step collapse)
+// Loss weights (close to the slide/demo defaults)
+const LAMBDA_SMOOTH = 1.2; // TV
+const LAMBDA_DIR = 2.2;    // direction
 
-// Differentiable distribution loss parameters
-const DIST_BINS = 64;      // more bins = closer to "sorted" behavior
-const DIST_SIGMA = 0.03;   // softness of bins (0.02 stricter, 0.05 looser)
+// SoftSort temperature:
+// smaller => closer to true sort, but can be harder to optimize.
+// good starting range: 0.05–0.2
+const SOFTSORT_TAU = 0.10;
 
 // -----------------------------------------------------------------------------
 // State
@@ -103,7 +103,7 @@ function drawTensorToCanvas(t4d, canvas) {
   const img = ctx.createImageData(W, H);
   const data = img.data;
 
-  const vals = t4d.dataSync(); // length 256
+  const vals = t4d.dataSync();
   for (let i = 0; i < H * W; i++) {
     const v01 = Math.max(0, Math.min(1, vals[i]));
     const v = Math.round(v01 * 255);
@@ -122,33 +122,63 @@ function mse(yTrue, yPred) {
   return tf.mean(tf.square(tf.sub(yTrue, yPred)));
 }
 
-// Differentiable distribution constraint (no topk/sort):
-// Soft-histogram CDF loss ≈ quantile matching / 1D Wasserstein-ish
-function cdfLoss(yTrue, yPred, bins = 64, sigma = 0.03) {
+/**
+ * Differentiable SoftSort approximation (NeuralSort-style).
+ * Returns approximately sorted values (descending).
+ *
+ * For vector s (length n):
+ * A_ij = |s_i - s_j|
+ * B_j  = sum_k A_jk
+ * scaling_i = (n + 1 - 2i), i=1..n
+ * logits_{i,j} = (scaling_i * s_j - B_j) / tau
+ * P = softmax(logits, axis=1)  (row-wise)
+ * sorted ≈ P @ s
+ */
+function softSort1D(s, tau = 0.1) {
   return tf.tidy(() => {
-    const a = yTrue.flatten(); // [N]
-    const b = yPred.flatten(); // [N]
-    const centers = tf.linspace(0, 1, bins).reshape([1, bins]); // [1,B]
+    const v = s.flatten();                // [n]
+    const n = v.size;
 
-    function softHist(x) {
-      const x2d = x.reshape([-1, 1]); // [N,1]
-      const dist2 = tf.square(tf.sub(x2d, centers)); // [N,B]
-      const w = tf.exp(tf.mul(dist2, -1 / (2 * sigma * sigma))); // [N,B]
-      const hist = tf.sum(w, 0); // [B]
-      return tf.div(hist, tf.sum(hist)); // normalize
-    }
+    // [n,1] and [1,n]
+    const vCol = v.reshape([n, 1]);
+    const vRow = v.reshape([1, n]);
 
-    const ha = softHist(a);     // [B]
-    const hb = softHist(b);     // [B]
-    const cdfa = tf.cumsum(ha); // [B]
-    const cdfb = tf.cumsum(hb); // [B]
+    // Pairwise abs diffs: [n,n]
+    const A = tf.abs(tf.sub(vCol, vRow));
 
-    return tf.mean(tf.square(tf.sub(cdfa, cdfb)));
+    // B_j = sum_k |v_j - v_k|  -> shape [1,n] for broadcasting
+    const ones = tf.ones([n, 1]);
+    const B = tf.matMul(A, ones).reshape([1, n]); // [1,n]
+
+    // scaling_i = n + 1 - 2i, i=1..n  -> [n,1]
+    const i = tf.range(1, n + 1, 1, "float32"); // [n]
+    const scaling = tf.sub(tf.scalar(n + 1, "float32"), tf.mul(tf.scalar(2, "float32"), i)).reshape([n, 1]);
+
+    // C_{i,j} = scaling_i * v_j -> [n,n]
+    const C = tf.matMul(scaling, vRow);
+
+    // logits: [n,n]
+    const logits = tf.div(tf.sub(C, B), tf.scalar(tau, "float32"));
+
+    // P: [n,n], each row sums to 1
+    const P = tf.softmax(logits, 1);
+
+    // sorted approx: [n,1] -> [n]
+    return tf.matMul(P, vCol).reshape([n]);
   });
 }
 
-function smoothness(yPred) {
-  // TV-like: squared neighbor diffs
+function sortedMSE_soft(yTrue, yPred) {
+  // MSE( SoftSort(yTrue), SoftSort(yPred) )
+  return tf.tidy(() => {
+    const a = softSort1D(yTrue, SOFTSORT_TAU);
+    const b = softSort1D(yPred, SOFTSORT_TAU);
+    return tf.mean(tf.square(tf.sub(a, b)));
+  });
+}
+
+function smoothnessTV(yPred) {
+  // TV-like: squared neighbor diffs (matches the slide idea)
   return tf.tidy(() => {
     const dx = tf.sub(
       yPred.slice([0, 0, 1, 0], [1, H, W - 1, 1]),
@@ -162,23 +192,9 @@ function smoothness(yPred) {
   });
 }
 
-// Correlation-based direction loss:
-// encourages brightness to increase with x, but DOESN'T reward saturating to 0/1.
-function directionCorrX(yPred) {
-  return tf.tidy(() => {
-    const y = yPred.flatten();
-    const x = xCoordMask.flatten();
-
-    const y0 = tf.sub(y, tf.mean(y));
-    const x0 = tf.sub(x, tf.mean(x));
-
-    const cov = tf.mean(tf.mul(y0, x0));
-    const yStd = tf.sqrt(tf.add(tf.mean(tf.square(y0)), 1e-8));
-    const xStd = tf.sqrt(tf.add(tf.mean(tf.square(x0)), 1e-8));
-
-    const corr = tf.div(cov, tf.mul(yStd, xStd)); // [-1, 1]
-    return tf.neg(corr); // minimize => maximize corr
-  });
+function directionLossSlide(yPred) {
+  // Slide formula: L_dir = -Mean(Output * Mask)  :contentReference[oaicite:2]{index=2}
+  return tf.tidy(() => tf.neg(tf.mean(tf.mul(yPred, xCoordMask))));
 }
 
 // -----------------------------------------------------------------------------
@@ -205,7 +221,6 @@ function createStudentModel(archType) {
   }
 
   if (archType === "transformation") {
-    // spatial mixing; often produces cleaner gradients
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
@@ -231,28 +246,20 @@ function createStudentModel(archType) {
 // -----------------------------------------------------------------------------
 // Losses
 function baselineLoss(yTrue, yPred) {
-  // Baseline = Level 1 trap: pixel-wise MSE only
+  // Level 1 trap: pixel-wise MSE only
   return mse(yTrue, yPred);
 }
 
 function studentLoss(yTrue, yPred) {
-  // Student = Level 2 + Level 3:
-  // - distribution constraint (cdfLoss) ~ "same histogram"
-  // - smoothness
-  // - direction (correlation with x mask)
-  const Ldist = cdfLoss(yTrue, yPred, DIST_BINS, DIST_SIGMA);
-  const Lsmooth = smoothness(yPred);
-  const Ldir = directionCorrX(yPred);
-
-  return tf.addN([
-    tf.mul(LAMBDA_DIST, Ldist),
-    tf.mul(LAMBDA_SMOOTH, Lsmooth),
-    tf.mul(LAMBDA_DIR, Ldir),
-  ]);
+  // Level 2 + Level 3 (per slides) :contentReference[oaicite:3]{index=3}
+  const Lsorted = sortedMSE_soft(yTrue, yPred);
+  const Ltv = smoothnessTV(yPred);
+  const Ldir = directionLossSlide(yPred);
+  return tf.addN([Lsorted, tf.mul(LAMBDA_SMOOTH, Ltv), tf.mul(LAMBDA_DIR, Ldir)]);
 }
 
 // -----------------------------------------------------------------------------
-// Training
+// Training (custom loop, separate optimizers, tidy)
 async function trainOneStepReturnLosses() {
   const yTrue = xInput;
 
@@ -287,6 +294,7 @@ async function trainOneStepReturnLosses() {
     studentLossTensor.dispose();
 
     stepCount++;
+
     setStatus({ step: stepCount, baseLoss: baseLossVal, studentLoss: studentLossVal });
 
     if (stepCount % LOG_EVERY === 0 || stepCount === 1) {
@@ -377,7 +385,7 @@ function makeXCoordMask() {
 }
 
 function makeFixedNoiseInput() {
-  // Not seeded, but fixed for the whole run because we keep the same tensor.
+  // Not seeded, but fixed for the whole run since we keep this tensor.
   return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
 }
 
@@ -476,11 +484,9 @@ async function main() {
   });
 
   setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
-
-  log("Ready. Baseline is MSE-copycat. Student is (CDF distribution + smooth + direction corr).", "ok");
-  log(`Weights: dist=${LAMBDA_DIST}, smooth=${LAMBDA_SMOOTH}, dir=${LAMBDA_DIR}`, "info");
-  log(`Dist params: bins=${DIST_BINS}, sigma=${DIST_SIGMA}`, "info");
-  log("Tip: 'Compression' usually gives that slightly-checkered gradient look like your target image.", "info");
+  log("Ready. Student uses SoftSortedMSE + TV + Direction (slide form).", "ok");
+  log(`SoftSort tau=${SOFTSORT_TAU} | lambdaSmooth=${LAMBDA_SMOOTH} | lambdaDir=${LAMBDA_DIR}`, "info");
+  log("Tip: If gradient is too blurry, lower tau to 0.07. If unstable, raise tau to 0.15.", "info");
 }
 
 main().catch((err) => log(String(err?.message || err), "error"));
