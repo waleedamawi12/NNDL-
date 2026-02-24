@@ -1,30 +1,17 @@
 // app.js
 // MNIST TF.js — DENOISING CNN AUTOENCODER (Browser-only, CSV Upload + Downloads Save/Load)
 // -------------------------------------------------------------------------------------
-// This replaces the classifier logic with a denoising autoencoder homework flow:
+// Fixes applied vs. previous version:
+// 1) Prevent "all black" trivial solution by using loss='binaryCrossentropy' (sigmoid output).
+// 2) Use stable decoder: UpSampling2D + Conv2D (instead of Conv2DTranspose).
+// 3) Reduce noise for smaller dataset subsets (6000 train): NOISE_FACTOR=0.25
+// 4) Add reconstruction range logging (min/max) to confirm outputs are not near-zero.
 //
-// Step 1) Add random noise to test data (no network fetch).
-// Step 2) Train CNN autoencoder to map noisy -> clean.
-// Step 3) "Test 5 Random" shows Clean | Noisy | Denoised for BOTH max-pooling and avg-pooling
-//         (two reconstructions side-by-side, same input batch).
-// Step 4) Save model and reload to reproduce results.
-//
-// IMPORTANT:
-// - This file assumes data-loader.js provides:
-//    loadTrainFromFiles, loadTestFromFiles, splitTrainVal, getRandomTestBatch, draw28x28ToCanvas
-// - We DO NOT use labels for training (autoencoder target is the clean image itself).
-// - We still keep ys tensors around because your loader makes them; we dispose properly on reset.
-//
-// UI NOTE:
-// - We keep the existing index.html controls.
-// - We support saving/downloading the currently "active" model (max or avg), selected via a dropdown
-//   we create dynamically in Model Info area (so no index.html edits required).
-//
-// SAFETY/PERFORMANCE:
-// - Uses tf.tidy in hot paths.
-// - Disposes intermediate tensors.
-// - Uses batching for evaluation metrics.
-// - Yields to UI via tf.nextFrame()/requestAnimationFrame.
+// Homework mapping:
+// Step 1: addRandomNoise() applied to test + training inputs.
+// Step 2: train autoencoders (max pooling and avg pooling) noisy->clean.
+// Step 3: Test 5 Random shows Clean | Noisy | Denoised(Max) | Denoised(Avg)
+// Step 4: Save/Load active model using downloads:// and browserFiles().
 
 (() => {
   // ---------------------------
@@ -62,21 +49,19 @@
   // ---------------------------
   let trainAll = null; // {xs, ys}
   let testAll = null;  // {xs, ys}
-  let split = null;    // {trainXs, trainYs, valXs, valYs} -- we will use xs only
+  let split = null;    // {trainXs, trainYs, valXs, valYs} -- we use xs only
 
-  // We train TWO models: max-pooling AE and avg-pooling AE
   let modelMax = null;
   let modelAvg = null;
 
-  // Which model is currently "active" for Save/Load/Eval buttons
   let activeModelKey = "max"; // "max" | "avg"
   let busy = false;
 
-  // Noise settings (homework step 1)
-  // You can expose this to the UI later; for now, keep it here.
-  const NOISE_FACTOR = 0.4;
+  // IMPORTANT FIX:
+  // With only 6000 training samples, noise=0.4 often encourages the trivial solution (all zeros).
+  // Use a slightly gentler noise for stable learning.
+  const NOISE_FACTOR = 0.25;
 
-  // For preview drawing
   const PREVIEW_SCALE = 4;
 
   // ---------------------------
@@ -113,6 +98,7 @@
     btnEval.disabled = !hasData || !hasAnyModel || busy;
     btnTest5.disabled = !hasData || !hasAnyModel || busy;
     btnSave.disabled = !active || busy;
+
     btnLoadData.disabled = busy;
     btnLoadModel.disabled = busy;
     btnReset.disabled = busy;
@@ -128,11 +114,10 @@
   }
 
   // ---------------------------
-  // Noise injection (Homework Step 1)
+  // Step 1: Noise injection
   // ---------------------------
-  // Adds Gaussian noise to xs and clips to [0,1].
-  // xs expected shape: [N,28,28,1]
   function addRandomNoise(xs, noiseFactor = NOISE_FACTOR) {
+    // xs shape [N,28,28,1], values in [0,1]
     return tf.tidy(() => {
       const noise = tf.randomNormal(xs.shape, 0, 1, "float32");
       return xs.add(noise.mul(noiseFactor)).clipByValue(0, 1);
@@ -140,15 +125,12 @@
   }
 
   // ---------------------------
-  // Autoencoder model builders (Homework Step 2)
+  // Step 2: Autoencoder builder
   // ---------------------------
-  // We build SAME architecture except pooling type:
-  // - Encoder: Conv -> Pool -> Conv -> Pool
-  // - Decoder: Conv2DTranspose upsample twice -> final Conv sigmoid
+  // Key Fix: UpSampling2D + Conv2D decoder is more stable than Conv2DTranspose in browsers.
+  // Key Fix: loss='binaryCrossentropy' with sigmoid output prevents "all black" MSE shortcut.
   function buildAutoencoder(poolType = "max") {
-    // poolType: "max" or "avg"
     const isMax = poolType === "max";
-
     const m = tf.sequential();
 
     // Encoder
@@ -177,25 +159,24 @@
       : tf.layers.averagePooling2d({ poolSize: 2, strides: 2 })
     );
 
-    // Decoder
-    // Conv2DTranspose with stride 2 upsamples spatially
-    m.add(tf.layers.conv2dTranspose({
+    // Decoder (UpSampling + Conv)
+    m.add(tf.layers.upSampling2d({ size: [2, 2] }));
+    m.add(tf.layers.conv2d({
       filters: 64,
       kernelSize: 3,
-      strides: 2,
       activation: "relu",
       padding: "same"
     }));
 
-    m.add(tf.layers.conv2dTranspose({
+    m.add(tf.layers.upSampling2d({ size: [2, 2] }));
+    m.add(tf.layers.conv2d({
       filters: 32,
       kernelSize: 3,
-      strides: 2,
       activation: "relu",
       padding: "same"
     }));
 
-    // Output layer: 1 channel image in [0,1]
+    // Output layer: sigmoid → [0,1]
     m.add(tf.layers.conv2d({
       filters: 1,
       kernelSize: 3,
@@ -203,21 +184,22 @@
       padding: "same"
     }));
 
-    // Denoising objective: pixel reconstruction
     m.compile({
-      optimizer: "adam",
-      loss: "meanSquaredError"
+      optimizer: tf.train.adam(1e-3),
+      // IMPORTANT FIX:
+      // BCE punishes missing bright pixels strongly and avoids trivial all-zero outputs.
+      loss: "binaryCrossentropy"
     });
 
     return m;
   }
 
-  // Renders model summary + adds a tiny model selector UI (no index.html edits needed)
+  // ---------------------------
+  // Model info rendering + selector (no index.html edits)
+  // ---------------------------
   function renderModelInfo() {
     const active = getActiveModel();
 
-    // Build a little selector above summary (inside modelInfo)
-    // Using plain DOM to stay dependency-free.
     const container = document.createElement("div");
     container.style.display = "flex";
     container.style.alignItems = "center";
@@ -244,7 +226,7 @@
     select.value = activeModelKey;
     select.addEventListener("change", () => {
       activeModelKey = select.value;
-      renderModelInfo(); // re-render summary for the new active model
+      renderModelInfo();
       setButtonsEnabled();
       log(`Active model switched to: ${activeModelKey.toUpperCase()} pooling`);
     });
@@ -252,15 +234,10 @@
     container.appendChild(title);
     container.appendChild(select);
 
-    // Capture model.summary() output
     const summaryLines = [];
-    if (active) {
-      active.summary(100, undefined, (line) => summaryLines.push(line));
-    } else {
-      summaryLines.push("No model built yet.");
-    }
+    if (active) active.summary(100, undefined, (line) => summaryLines.push(line));
+    else summaryLines.push("No model built yet.");
 
-    // Replace modelInfo content
     modelInfo.innerHTML = "";
     modelInfo.appendChild(container);
 
@@ -272,7 +249,7 @@
   }
 
   // ---------------------------
-  // tfjs-vis utilities
+  // tfjs-vis visor toggle
   // ---------------------------
   function showOrToggleVisor() {
     const visor = tfvis.visor();
@@ -280,7 +257,7 @@
   }
 
   // ---------------------------
-  // Data loading (same as before, but now used for denoising)
+  // Data loading
   // ---------------------------
   async function onLoadData() {
     if (busy) return;
@@ -294,7 +271,6 @@
 
       const trainFile = trainCsvInput.files && trainCsvInput.files[0];
       const testFile = testCsvInput.files && testCsvInput.files[0];
-
       if (!trainFile || !testFile) {
         throw new Error("Please select BOTH mnist_train.csv and mnist_test.csv.");
       }
@@ -305,7 +281,7 @@
         `Loading...\n` +
         `Train file: ${trainFile.name} (${bytesToMB(trainFile.size)} MB)\n` +
         `Test file:  ${testFile.name} (${bytesToMB(testFile.size)} MB)\n\n` +
-        `Parsing CSV → tensors (this can take a bit).`
+        `Parsing CSV → tensors...`
       );
 
       log("Parsing training CSV...");
@@ -318,13 +294,12 @@
 
       split = window.splitTrainVal(trainAll.xs, trainAll.ys, 0.1);
 
-      // Build both models fresh (max + avg)
       if (modelMax) modelMax.dispose();
       if (modelAvg) modelAvg.dispose();
+
       modelMax = buildAutoencoder("max");
       modelAvg = buildAutoencoder("avg");
 
-      // Default active: max
       activeModelKey = "max";
       renderModelInfo();
 
@@ -337,8 +312,9 @@
         `Train: ${trainN} samples → xs ${trainAll.xs.shape}\n` +
         `Val:   ${valN} samples → xs ${split.valXs.shape}\n` +
         `Test:  ${testN} samples → xs ${testAll.xs.shape}\n\n` +
-        `Noise: Gaussian, factor=${NOISE_FACTOR}\n` +
-        `Training target: clean images (denoising autoencoder)`
+        `Noise: Gaussian factor=${NOISE_FACTOR}\n` +
+        `Loss: binaryCrossentropy (prevents all-black collapse)\n` +
+        `Decoder: UpSampling2D + Conv2D (stable in browsers)`
       );
 
       log(`Data ready. Train=${trainN}, Val=${valN}, Test=${testN}`);
@@ -353,28 +329,20 @@
   }
 
   // ---------------------------
-  // Training (Homework Step 2)
+  // Training
   // ---------------------------
   async function trainOneModel(modelToTrain, label, trainXsClean, valXsClean) {
-    // We train: noisy -> clean
-    // Inputs: noisy version of train/val
-    // Targets: clean images
-    //
-    // We generate noise per-epoch implicitly by regenerating noisy tensors before fit.
-    // For simplicity & speed, we generate once per training call (good enough for homework).
-
-    const epochs = 10;
+    const epochs = 15;
     const batchSize = 128;
 
     log(`Training ${label}: epochs=${epochs}, batchSize=${batchSize}, noise=${NOISE_FACTOR}`);
 
     const t0 = performance.now();
 
-    // Create noisy train/val tensors
+    // Create noisy inputs; targets remain clean.
     const noisyTrainXs = addRandomNoise(trainXsClean, NOISE_FACTOR);
     const noisyValXs = addRandomNoise(valXsClean, NOISE_FACTOR);
 
-    // tfjs-vis live curves
     const fitSurface = { name: `AE ${label} (Loss)`, tab: "Training" };
     const callbacks = tfvis.show.fitCallbacks(
       fitSurface,
@@ -389,7 +357,6 @@
       }
     );
 
-    // Train
     const history = await modelToTrain.fit(noisyTrainXs, trainXsClean, {
       epochs,
       batchSize,
@@ -398,19 +365,16 @@
       callbacks
     });
 
-    // Cleanup noisy tensors
     noisyTrainXs.dispose();
     noisyValXs.dispose();
 
     const t1 = performance.now();
     const durSec = (t1 - t0) / 1000;
 
-    // Best val loss (lower is better)
     const valLossHist = history.history.val_loss || [];
     const bestValLoss = valLossHist.length ? Math.min(...valLossHist) : NaN;
 
     log(`Training ${label} done in ${durSec.toFixed(2)}s. Best val_loss=${bestValLoss.toFixed(5)}`);
-
     return { durSec, bestValLoss };
   }
 
@@ -425,7 +389,6 @@
       clearPreview();
       overallAcc.textContent = "—";
 
-      // Train both models sequentially (more stable for browser memory)
       log("=== TRAINING START (Autoencoders) ===");
       const resMax = await trainOneModel(modelMax, "MAX", split.trainXs, split.valXs);
       await tf.nextFrame();
@@ -440,7 +403,7 @@
         `\n\nTraining finished.\n` +
         `MAX best val_loss: ${resMax.bestValLoss.toFixed(5)}\n` +
         `AVG best val_loss: ${resAvg.bestValLoss.toFixed(5)}\n` +
-        `Try "Test 5 Random" to compare denoising side-by-side.`
+        `Now click "Test 5 Random" to see denoising outputs.`
       );
 
       renderModelInfo();
@@ -454,59 +417,41 @@
   }
 
   // ---------------------------
-  // Evaluation for autoencoder (Homework Step 2/3)
+  // Evaluation (simple metric for homework)
   // ---------------------------
-  // For denoising, "accuracy" isn't directly meaningful.
-  // Instead we compute:
-  // - MSE between reconstruction and clean images (lower is better)
-  // - PSNR (optional, derived from MSE): 20*log10(MAX_I) - 10*log10(MSE), MAX_I=1.0
-  //
-  // We still display "Overall Test Accuracy" field, but now it's "Overall Test MSE / PSNR".
-  async function evaluateDenoising(modelToEval, label, testXsClean) {
+  // We re-use the "Overall Test Accuracy" label to show reconstruction quality.
+  // We'll compute MSE just as a numeric baseline, even though training uses BCE.
+  async function evaluateMSE(modelToEval, label, testXsClean) {
     const batchSize = 512;
     const n = testXsClean.shape[0];
 
-    // We'll generate one noisy version of entire test set (consistent evaluation)
-    // NOTE: This can be memory-heavy for big test sets. For MNIST (10k), it's fine.
     const testXsNoisy = addRandomNoise(testXsClean, NOISE_FACTOR);
 
-    let sumMSE = 0;
+    let sum = 0;
     let count = 0;
 
     for (let start = 0; start < n; start += batchSize) {
       const size = Math.min(batchSize, n - start);
 
-      const mseVal = await tf.tidy(async () => {
+      const mseVal = tf.tidy(() => {
         const xClean = testXsClean.slice([start, 0, 0, 0], [size, 28, 28, 1]);
         const xNoisy = testXsNoisy.slice([start, 0, 0, 0], [size, 28, 28, 1]);
-
         const recon = modelToEval.predict(xNoisy);
-
-        // MSE per batch: mean((recon-clean)^2)
         const mse = recon.sub(xClean).square().mean();
-        const v = (await mse.data())[0];
-
-        // Dispose explicitly for clarity (tidy will do it too, but this is educational)
-        xClean.dispose();
-        xNoisy.dispose();
-        recon.dispose();
-        mse.dispose();
-
+        const v = mse.dataSync()[0];
         return v;
       });
 
-      sumMSE += mseVal * size;
+      sum += mseVal * size;
       count += size;
-
       await tf.nextFrame();
     }
 
     testXsNoisy.dispose();
 
-    const mse = sumMSE / count;
-    const psnr = 20 * Math.log10(1.0) - 10 * Math.log10(mse); // MAX_I=1
+    const mse = sum / count;
+    const psnr = 20 * Math.log10(1.0) - 10 * Math.log10(mse);
     log(`${label} test MSE=${mse.toFixed(6)} PSNR=${psnr.toFixed(2)} dB`);
-
     return { mse, psnr };
   }
 
@@ -522,20 +467,17 @@
       log("Evaluating denoising performance (MSE/PSNR) on test set...");
       await tf.nextFrame();
 
-      // Evaluate both models
-      const rMax = await evaluateDenoising(modelMax, "MAX", testAll.xs);
-      const rAvg = await evaluateDenoising(modelAvg, "AVG", testAll.xs);
+      const rMax = await evaluateMSE(modelMax, "MAX", testAll.xs);
+      const rAvg = await evaluateMSE(modelAvg, "AVG", testAll.xs);
 
-      // Show summary in the "Overall Test Accuracy" field (reused UI slot)
       overallAcc.textContent =
         `MAX MSE ${rMax.mse.toFixed(5)} | AVG MSE ${rAvg.mse.toFixed(5)} (noise=${NOISE_FACTOR})`;
 
-      // Render a comparison bar chart in tfjs-vis
       tfvis.render.barchart(
         { name: "Denoising MSE (Lower is Better)", tab: "Evaluation" },
         [
           { index: "MAX", value: rMax.mse },
-          { index: "AVG", value: rAvg.mse },
+          { index: "AVG", value: rAvg.mse }
         ],
         { xLabel: "Model", yLabel: "MSE", height: 300 }
       );
@@ -544,7 +486,7 @@
         { name: "Denoising PSNR (Higher is Better)", tab: "Evaluation" },
         [
           { index: "MAX", value: rMax.psnr },
-          { index: "AVG", value: rAvg.psnr },
+          { index: "AVG", value: rAvg.psnr }
         ],
         { xLabel: "Model", yLabel: "PSNR (dB)", height: 300 }
       );
@@ -560,12 +502,8 @@
   }
 
   // ---------------------------
-  // Test 5 Random (Homework Step 3)
+  // Step 3: Test 5 Random preview
   // ---------------------------
-  // Display for each sample:
-  //   Clean | Noisy | Denoised(MAX) | Denoised(AVG)
-  //
-  // So each preview item becomes a mini grid of 4 images.
   async function onTestFive() {
     if (busy) return;
     if (!testAll || !modelMax || !modelAvg) return;
@@ -576,23 +514,24 @@
     try {
       clearPreview();
 
-      // Get 5 random test images (we only need xs; ys unused here)
       const { batchXs, batchYs } = window.getRandomTestBatch(testAll.xs, testAll.ys, 5);
-
-      // Create noisy inputs
       const noisyBatch = addRandomNoise(batchXs, NOISE_FACTOR);
 
-      // Predict reconstructions from both models
       const reconMax = modelMax.predict(noisyBatch);
       const reconAvg = modelAvg.predict(noisyBatch);
 
-      // Build UI rows
+      // DEBUG: If these ranges are near [0,0], it will look black.
+      const maxMin = reconMax.min().dataSync()[0];
+      const maxMax = reconMax.max().dataSync()[0];
+      const avgMin = reconAvg.min().dataSync()[0];
+      const avgMax = reconAvg.max().dataSync()[0];
+      log(`Recon ranges -> MAX: [${maxMin.toFixed(4)}, ${maxMax.toFixed(4)}], AVG: [${avgMin.toFixed(4)}, ${avgMax.toFixed(4)}]`);
+
       for (let i = 0; i < 5; i++) {
         const item = document.createElement("div");
         item.className = "previewItem";
-        item.style.minWidth = "280px"; // wider because we show 4 images
+        item.style.minWidth = "280px";
 
-        // A small title line
         const title = document.createElement("div");
         title.style.fontSize = "11px";
         title.style.color = "#93a4c7";
@@ -600,20 +539,16 @@
         title.textContent = `Sample #${i + 1}`;
         item.appendChild(title);
 
-        // Grid container for 4 canvases
         const grid = document.createElement("div");
         grid.style.display = "grid";
         grid.style.gridTemplateColumns = "repeat(4, 1fr)";
         grid.style.gap = "6px";
 
-        // Helper to create one labeled canvas cell
-        const cell = (labelText) => {
+        const makeCell = (labelText) => {
           const wrap = document.createElement("div");
           wrap.style.textAlign = "center";
 
           const c = document.createElement("canvas");
-          c.style.width = `${28 * PREVIEW_SCALE}px`;
-          c.style.height = `${28 * PREVIEW_SCALE}px`;
           c.width = 28 * PREVIEW_SCALE;
           c.height = 28 * PREVIEW_SCALE;
 
@@ -628,42 +563,35 @@
           return { wrap, canvas: c };
         };
 
-        const cleanCell = cell("Clean");
-        const noisyCell2 = cell("Noisy");
-        const maxCell = cell("Denoised (Max)");
-        const avgCell = cell("Denoised (Avg)");
+        const cleanCell = makeCell("Clean");
+        const noisyCell = makeCell("Noisy");
+        const maxCell = makeCell("Denoised (Max)");
+        const avgCell = makeCell("Denoised (Avg)");
 
         grid.appendChild(cleanCell.wrap);
-        grid.appendChild(noisyCell2.wrap);
+        grid.appendChild(noisyCell.wrap);
         grid.appendChild(maxCell.wrap);
         grid.appendChild(avgCell.wrap);
 
         item.appendChild(grid);
         previewStrip.appendChild(item);
 
-        // Slice tensors for this index and draw
         const clean = batchXs.slice([i, 0, 0, 0], [1, 28, 28, 1]);
         const noisy = noisyBatch.slice([i, 0, 0, 0], [1, 28, 28, 1]);
         const dMax = reconMax.slice([i, 0, 0, 0], [1, 28, 28, 1]);
         const dAvg = reconAvg.slice([i, 0, 0, 0], [1, 28, 28, 1]);
 
         window.draw28x28ToCanvas(clean, cleanCell.canvas, PREVIEW_SCALE);
-        window.draw28x28ToCanvas(noisy, noisyCell2.canvas, PREVIEW_SCALE);
+        window.draw28x28ToCanvas(noisy, noisyCell.canvas, PREVIEW_SCALE);
         window.draw28x28ToCanvas(dMax, maxCell.canvas, PREVIEW_SCALE);
         window.draw28x28ToCanvas(dAvg, avgCell.canvas, PREVIEW_SCALE);
 
-        clean.dispose();
-        noisy.dispose();
-        dMax.dispose();
-        dAvg.dispose();
-
-        // Yield so Safari doesn't freeze while drawing
+        clean.dispose(); noisy.dispose(); dMax.dispose(); dAvg.dispose();
         await tf.nextFrame();
       }
 
       log(`Previewed 5 random test samples with noise=${NOISE_FACTOR} (Clean|Noisy|Max|Avg).`);
 
-      // Cleanup tensors
       reconMax.dispose();
       reconAvg.dispose();
       noisyBatch.dispose();
@@ -679,14 +607,10 @@
   }
 
   // ---------------------------
-  // Save / Load model (Homework Step 4)
+  // Step 4: Save / Load model files (ACTIVE slot)
   // ---------------------------
-  // Save the ACTIVE model to downloads://
-  // NOTE: downloads:// will name the files:
-  //   <name>.json and <name>.weights.bin
   async function onSaveDownload() {
     if (busy) return;
-
     const active = getActiveModel();
     if (!active) return;
 
@@ -707,12 +631,6 @@
     }
   }
 
-  // Load model from user selected files and assign it to the ACTIVE slot (max or avg).
-  // That way students can:
-  // - Train both models
-  // - Save max model
-  // - Reset
-  // - Load max model back into max slot
   async function onLoadFromFiles() {
     if (busy) return;
     busy = true;
@@ -730,13 +648,12 @@
 
       const loaded = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, binFile]));
 
-      // Ensure it's compiled for evaluation and potential further training
+      // Compile for eval/further training
       loaded.compile({
-        optimizer: "adam",
-        loss: "meanSquaredError"
+        optimizer: tf.train.adam(1e-3),
+        loss: "binaryCrossentropy"
       });
 
-      // Replace the correct slot
       if (activeModelKey === "avg") {
         if (modelAvg) modelAvg.dispose();
         modelAvg = loaded;
@@ -757,7 +674,7 @@
   }
 
   // ---------------------------
-  // Reset: dispose everything and clear UI
+  // Reset + cleanup
   // ---------------------------
   function disposeAllTensors() {
     if (split) {
@@ -798,9 +715,8 @@
       activeModelKey = "max";
       renderModelInfo();
 
-      setStatus("Reset.\nUpload train/test CSV files, then click Load Data.");
+      setStatus(`Reset.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
 
-      // Clear file inputs (allow reselect same file)
       trainCsvInput.value = "";
       testCsvInput.value = "";
       modelJsonInput.value = "";
@@ -810,8 +726,6 @@
       testName.textContent = "No file selected";
       jsonName.textContent = "No file";
       binName.textContent = "No file";
-
-      // Optional: keep visor state as user preference
     } finally {
       busy = false;
       setButtonsEnabled();
@@ -819,7 +733,7 @@
   }
 
   // ---------------------------
-  // Wire DOM events
+  // Wire UI
   // ---------------------------
   function bindUI() {
     trainCsvInput.addEventListener("change", () => {
@@ -856,7 +770,6 @@
   // Boot
   // ---------------------------
   function boot() {
-    // Close visor initially; user can open it.
     try { tfvis.visor().close(); } catch (_) {}
 
     setStatus(`Ready.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
@@ -864,7 +777,8 @@
     bindUI();
     setButtonsEnabled();
 
-    log("Autoencoder mode: Train noisy→clean. Use Test 5 Random to see Clean|Noisy|Denoised(Max)|Denoised(Avg).");
+    log("Autoencoder mode: Train noisy→clean. Preview shows Clean|Noisy|Denoised(Max)|Denoised(Avg).");
+    log("Fixes: BCE loss + UpSampling decoder (prevents all-black collapse).");
   }
 
   boot();
