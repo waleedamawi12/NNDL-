@@ -1,26 +1,16 @@
 // app.js
 // Neural Network Design: The Gradient Puzzle (TFJS, 2-file version)
 //
-// FINAL FIXED VERSION for GitHub Pages / WebGL:
+// FIXED for GitHub Pages / WebGL:
+// - tf.topk() has NO gradient in TFJS ("gradient function not found for TopK").
+// - So we replace sortedMSE(topk-sort) with a differentiable distribution constraint:
+//     CDF loss via soft-histogram (approx 1D Wasserstein / quantile match)
 //
-// Problem you hit:
-// - tf.topk() (used for "sorting") has NO gradient in TFJS on WebGL:
-//   "Cannot compute gradient: gradient function not found for TopK."
-//
-// Fixes in this file:
-// 1) Replace topk/sort-based loss with a differentiable distribution constraint:
-//    soft-histogram CDF loss (approx 1D Wasserstein / quantile match).
-// 2) Replace the "direction" loss that encourages saturation (step function) with
-//    a bounded correlation-based direction loss (Pearson correlation), which
-//    prevents the model from cheating by slamming pixels to 0/1.
-// 3) Add an explicit weight for distribution loss, so histogram preservation
-//    actually wins.
-//
-// Expected behavior:
-// - Baseline output stays noise-like (pixel MSE copycat).
-// - Student output becomes a smooth left→right gradient while roughly preserving
-//   the input brightness distribution.
+// Baseline: pixel-wise MSE only (copycat / stuck).
+// Student: cdfLoss (distribution) + smoothness + direction (forms gradient).
 
+// -----------------------------------------------------------------------------
+// DOM
 const $ = (sel) => document.querySelector(sel);
 const logEl = $("#log");
 const statusLine = $("#statusLine");
@@ -49,18 +39,17 @@ const BASE_LR = 1e-2;
 const STUDENT_LR = 3e-2;
 
 // Auto-stop
-const AUTO_MAX_STEPS = 6000;
-const PLATEAU_PATIENCE = 1200;
+const AUTO_MAX_STEPS = 5000;
+const PLATEAU_PATIENCE = 900;
 const MIN_DELTA = 1e-8;
 
-// Loss weights (tuned to avoid "banded step function" solutions)
-const LAMBDA_DIST = 12.0;  // strong “keep the same histogram”
-const LAMBDA_SMOOTH = 2.5; // smoothness / TV-ish
-const LAMBDA_DIR = 1.0;    // direction (keep modest)
+// Loss weights (tune if you want)
+const LAMBDA_SMOOTH = 2.0; // higher -> less checker/noise
+const LAMBDA_DIR = 2.0;    // higher -> stronger left->right bias
 
-// Differentiable distribution loss parameters
-const DIST_BINS = 64;      // more bins = stricter match (32–128)
-const DIST_SIGMA = 0.02;   // smaller = stricter, but can be harder (0.02–0.05)
+// Distribution loss parameters (soft histogram)
+const DIST_BINS = 32;      // 16–64 typical
+const DIST_SIGMA = 0.03;   // 0.02 stricter, 0.05 smoother
 
 // -----------------------------------------------------------------------------
 // State
@@ -88,12 +77,12 @@ let stepsSinceBest = 0;
 // Logging helpers
 function log(msg, kind = "info") {
   const prefix = kind === "error" ? "✖ " : kind === "ok" ? "✓ " : "• ";
-  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 7000);
+  logEl.textContent = (prefix + msg + "\n" + logEl.textContent).slice(0, 5000);
 }
 function fmt(x) {
   if (x == null || Number.isNaN(x)) return "—";
   if (!Number.isFinite(x)) return String(x);
-  if (Math.abs(x) < 1e-3) return x.toExponential(2);
+  if (x < 1e-3) return x.toExponential(2);
   return x.toFixed(4);
 }
 function setStatus({ step, baseLoss, studentLoss }) {
@@ -128,8 +117,8 @@ function mse(yTrue, yPred) {
 }
 
 // Differentiable distribution constraint (no topk/sort):
-// soft-histogram CDF loss ≈ 1D Wasserstein-ish distribution match
-function cdfLoss(yTrue, yPred, bins = 64, sigma = 0.02) {
+// Soft-histogram CDF loss ≈ 1D Wasserstein-ish distribution match
+function cdfLoss(yTrue, yPred, bins = 32, sigma = 0.03) {
   return tf.tidy(() => {
     const a = yTrue.flatten(); // [N]
     const b = yPred.flatten(); // [N]
@@ -143,10 +132,10 @@ function cdfLoss(yTrue, yPred, bins = 64, sigma = 0.02) {
       return tf.div(hist, tf.sum(hist)); // normalize
     }
 
-    const ha = softHist(a);     // [B]
-    const hb = softHist(b);     // [B]
-    const cdfa = tf.cumsum(ha); // [B]
-    const cdfb = tf.cumsum(hb); // [B]
+    const ha = softHist(a);         // [B]
+    const hb = softHist(b);         // [B]
+    const cdfa = tf.cumsum(ha);     // [B]
+    const cdfb = tf.cumsum(hb);     // [B]
 
     return tf.mean(tf.square(tf.sub(cdfa, cdfb)));
   });
@@ -167,22 +156,9 @@ function smoothness(yPred) {
   });
 }
 
-// Correlation-based direction loss (bounded, avoids "step function" cheating)
-function directionCorrX(yPred) {
-  return tf.tidy(() => {
-    const y = yPred.flatten();
-    const x = xCoordMask.flatten();
-
-    const y0 = tf.sub(y, tf.mean(y));
-    const x0 = tf.sub(x, tf.mean(x));
-
-    const cov = tf.mean(tf.mul(y0, x0));
-    const yStd = tf.sqrt(tf.add(tf.mean(tf.square(y0)), 1e-8));
-    const xStd = tf.sqrt(tf.add(tf.mean(tf.square(x0)), 1e-8));
-
-    const corr = tf.div(cov, tf.mul(yStd, xStd)); // [-1, 1]
-    return tf.neg(corr); // minimize => maximize corr
-  });
+function directionX(yPred) {
+  // Minimize -mean(output * mask) => bright on right, dark on left
+  return tf.tidy(() => tf.neg(tf.mean(tf.mul(yPred, xCoordMask))));
 }
 
 // -----------------------------------------------------------------------------
@@ -210,6 +186,7 @@ function createStudentModel(archType) {
   }
 
   if (archType === "transformation") {
+    // Same spatial size: conv mixing + residual
     let x = inp;
     x = tf.layers.conv2d({ filters: 16, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 16, kernelSize: 1, padding: "same", activation: "relu" }).apply(x);
@@ -221,6 +198,7 @@ function createStudentModel(archType) {
   }
 
   if (archType === "expansion") {
+    // Overcomplete: expand channels then project down
     let x = inp;
     x = tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
     x = tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: "same", activation: "relu" }).apply(x);
@@ -235,23 +213,24 @@ function createStudentModel(archType) {
 // -----------------------------------------------------------------------------
 // Losses
 function baselineLoss(yTrue, yPred) {
+  // Baseline = Level 1 trap: pixel-wise MSE only
   return mse(yTrue, yPred);
 }
 
 function studentLoss(yTrue, yPred) {
+  // FIXED: differentiable distribution matching (no TopK gradient issues)
   const Ldist = cdfLoss(yTrue, yPred, DIST_BINS, DIST_SIGMA);
   const Lsmooth = smoothness(yPred);
-  const Ldir = directionCorrX(yPred);
-
+  const Ldir = directionX(yPred);
   return tf.addN([
-    tf.mul(LAMBDA_DIST, Ldist),
+    Ldist,
     tf.mul(LAMBDA_SMOOTH, Lsmooth),
     tf.mul(LAMBDA_DIR, Ldir),
   ]);
 }
 
 // -----------------------------------------------------------------------------
-// Training loop
+// Training (custom loop, separate optimizers, tidy)
 async function trainOneStepReturnLosses() {
   const yTrue = xInput;
 
@@ -305,7 +284,7 @@ async function trainOneStepReturnLosses() {
     log(String(err?.message || err), "error");
   }
 
-  // Plateau tracking (combined score)
+  // Plateau tracking (use combined score)
   const combo =
     (Number.isFinite(baseLossVal) ? baseLossVal : 0) +
     (Number.isFinite(studentLossVal) ? studentLossVal : 0);
@@ -342,4 +321,143 @@ async function autoLoop() {
     if (stepsSinceBest >= PLATEAU_PATIENCE) {
       log(`Auto-stop: plateau (${PLATEAU_PATIENCE} steps without improvement).`, "ok");
       stopAuto();
-     
+      return;
+    }
+  }
+
+  rafHandle = requestAnimationFrame(autoLoop);
+}
+
+function startAuto() {
+  if (autoRunning) return;
+  autoRunning = true;
+  btnAuto.textContent = "Auto Train (Stop)";
+  log("Auto train started.", "ok");
+  rafHandle = requestAnimationFrame(autoLoop);
+}
+
+function stopAuto() {
+  autoRunning = false;
+  btnAuto.textContent = "Auto Train (Start)";
+  if (rafHandle != null) cancelAnimationFrame(rafHandle);
+  rafHandle = null;
+  log("Auto train stopped.", "ok");
+}
+
+// -----------------------------------------------------------------------------
+// Init / Reset / rebuild
+function makeXCoordMask() {
+  return tf.tidy(() => {
+    const xs = tf.linspace(-1, 1, W);
+    const row = xs.reshape([1, 1, W, 1]);
+    return row.tile([1, H, 1, 1]);
+  });
+}
+
+function makeFixedNoiseInput() {
+  // Not a seeded RNG, but we keep the SAME tensor for the whole run, so it is “fixed”.
+  return tf.tidy(() => tf.randomUniform(SHAPE_4D, 0, 1, "float32"));
+}
+
+function rebuildStudentModel(newArchType) {
+  if (studentModel) studentModel.dispose();
+  studentModel = createStudentModel(newArchType);
+  studentOpt = tf.train.adam(STUDENT_LR);
+
+  bestComboLoss = Infinity;
+  stepsSinceBest = 0;
+
+  log(`Student model rebuilt: arch='${newArchType}'.`, "ok");
+}
+
+function resetAllWeights() {
+  stopAuto();
+
+  stepCount = 0;
+  bestComboLoss = Infinity;
+  stepsSinceBest = 0;
+
+  if (baselineModel) baselineModel.dispose();
+  if (studentModel) studentModel.dispose();
+
+  baselineModel = createBaselineModel();
+  studentModel = createStudentModel(studentArchType);
+
+  baseOpt = tf.train.adam(BASE_LR);
+  studentOpt = tf.train.adam(STUDENT_LR);
+
+  tf.tidy(() => {
+    const b = baselineModel.predict(xInput);
+    const s = studentModel.predict(xInput);
+    drawTensorToCanvas(xInput, cvInput);
+    drawTensorToCanvas(b, cvBase);
+    drawTensorToCanvas(s, cvStudent);
+  });
+
+  setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
+  log("Weights reset. (Baseline + Student reinitialized.)", "ok");
+}
+
+// -----------------------------------------------------------------------------
+// UI wiring
+btnStep.addEventListener("click", async () => {
+  stopAuto();
+  await trainOneStep();
+});
+
+btnAuto.addEventListener("click", () => {
+  autoRunning ? stopAuto() : startAuto();
+});
+
+btnReset.addEventListener("click", () => {
+  resetAllWeights();
+});
+
+document.querySelectorAll("input[name='arch']").forEach(radio => {
+  radio.addEventListener("change", () => {
+    const newType = document.querySelector("input[name='arch']:checked").value;
+    studentArchType = newType;
+
+    stopAuto();
+    rebuildStudentModel(newType);
+
+    tf.tidy(() => {
+      const b = baselineModel.predict(xInput);
+      const s = studentModel.predict(xInput);
+      drawTensorToCanvas(xInput, cvInput);
+      drawTensorToCanvas(b, cvBase);
+      drawTensorToCanvas(s, cvStudent);
+    });
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Boot
+async function main() {
+  await tf.ready();
+
+  xInput = makeFixedNoiseInput();
+  xCoordMask = makeXCoordMask();
+
+  baselineModel = createBaselineModel();
+  studentModel = createStudentModel(studentArchType);
+
+  baseOpt = tf.train.adam(BASE_LR);
+  studentOpt = tf.train.adam(STUDENT_LR);
+
+  tf.tidy(() => {
+    const b = baselineModel.predict(xInput);
+    const s = studentModel.predict(xInput);
+    drawTensorToCanvas(xInput, cvInput);
+    drawTensorToCanvas(b, cvBase);
+    drawTensorToCanvas(s, cvStudent);
+  });
+
+  setStatus({ step: stepCount, baseLoss: NaN, studentLoss: NaN });
+
+  log("Ready. Baseline is MSE-copycat. Student is (cdfLoss + smooth + direction).", "ok");
+  log(`Loss weights: lambdaSmooth=${LAMBDA_SMOOTH}, lambdaDir=${LAMBDA_DIR}.`, "info");
+  log(`Dist params: bins=${DIST_BINS}, sigma=${DIST_SIGMA}.`, "info");
+}
+
+main().catch((err) => log(String(err?.message || err), "error"));
