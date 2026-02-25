@@ -1,19 +1,40 @@
-// app.js
-// MNIST TF.js — DENOISING CNN AUTOENCODER (Browser-only, CSV Upload + Downloads Save/Load)
-// -------------------------------------------------------------------------------------
-// Fixes applied vs. previous version:
-// 1) Prevent "all black" trivial solution by using loss='binaryCrossentropy' (sigmoid output).
-// 2) Use stable decoder: UpSampling2D + Conv2D (instead of Conv2DTranspose).
-// 3) Reduce noise for smaller dataset subsets (6000 train): NOISE_FACTOR=0.25
-// 4) Add reconstruction range logging (min/max) to confirm outputs are not near-zero.
+```js
+// app-2.js
+// ChineseMNIST TF.js — DENOISING CNN AUTOENCODER (Browser-only, CSV Upload + Downloads Save/Load)
+// ---------------------------------------------------------------------------------------------
+// This version is a FULL FIX for 64×64 datasets like ChineseMNIST.
 //
-// Homework mapping:
-// Step 1: addRandomNoise() applied to test + training inputs.
-// Step 2: train autoencoders (max pooling and avg pooling) noisy->clean.
-// Step 3: Test 5 Random shows Clean | Noisy | Denoised(Max) | Denoised(Avg)
-// Step 4: Save/Load active model using downloads:// and browserFiles().
+// What it fixes vs your current (28×28 MNIST) assumptions:
+// 1) Works with 64×64 (=4096 pixels) images.
+// 2) Loads CSV where pixels come first and label/character are at the END (common ChineseMNIST CSV layout).
+// 3) Does NOT require labels for autoencoding (we only need xs). We still tolerate labels if present.
+// 4) Updates model inputShape, slicing, preview drawing, evaluation to 64×64.
+// 5) Keeps your UI the same (index.html unchanged).
+//
+// Expected CSV row formats supported (NO external libs):
+// A) ChineseMNIST typical: pixel_0..pixel_4095,label,character  (4098 columns)
+//    In our split files written without header, each row is:
+///     p0,p1,...,p4095,label,character
+// B) MNIST style: label,p0..p4095  (4097 columns)  (rare, but we support it)
+//
+// IMPORTANT:
+// - This is a denoising autoencoder (no classification). We display MSE/PSNR as "Overall Test Accuracy" label.
 
 (() => {
+  // ---------------------------
+  // Constants (ChineseMNIST)
+  // ---------------------------
+  const IMG_H = 64;
+  const IMG_W = 64;
+  const CHANNELS = 1;
+  const PIXELS = IMG_H * IMG_W; // 4096
+
+  // Noise factor: tune if you see too much corruption
+  const NOISE_FACTOR = 0.25;
+
+  // Preview scale (canvas pixel upscaling)
+  const PREVIEW_SCALE = 3;
+
   // ---------------------------
   // DOM helpers / UI elements
   // ---------------------------
@@ -47,22 +68,16 @@
   // ---------------------------
   // App state (tensors + models)
   // ---------------------------
-  let trainAll = null; // {xs, ys}
-  let testAll = null;  // {xs, ys}
-  let split = null;    // {trainXs, trainYs, valXs, valYs} -- we use xs only
+  let trainXsAll = null; // tf.Tensor4D [N,64,64,1]
+  let testXsAll = null;  // tf.Tensor4D [N,64,64,1]
+
+  let split = null;      // {trainXs, valXs}
 
   let modelMax = null;
   let modelAvg = null;
 
   let activeModelKey = "max"; // "max" | "avg"
   let busy = false;
-
-  // IMPORTANT FIX:
-  // With only 6000 training samples, noise=0.4 often encourages the trivial solution (all zeros).
-  // Use a slightly gentler noise for stable learning.
-  const NOISE_FACTOR = 0.25;
-
-  const PREVIEW_SCALE = 4;
 
   // ---------------------------
   // Utility: logging + status
@@ -90,7 +105,7 @@
   }
 
   function setButtonsEnabled() {
-    const hasData = !!(trainAll && testAll && split);
+    const hasData = !!(trainXsAll && testXsAll && split);
     const hasAnyModel = !!(modelMax || modelAvg);
     const active = getActiveModel();
 
@@ -114,10 +129,154 @@
   }
 
   // ---------------------------
+  // CSV loading (NO external libs)
+  // ---------------------------
+  // Reads a CSV file into xs tensor [N,64,64,1] normalized to [0,1].
+  //
+  // Supports:
+  // - 4098 columns: p0..p4095,label,character  (we ignore label/character)
+  // - 4097 columns: label,p0..p4095           (we ignore label)
+  //
+  // Ignores empty lines.
+  async function loadXsFromCsvFile(file) {
+    if (!file) throw new Error("No CSV file provided.");
+
+    // Read as text (OK for 15k rows; still manageable). If your file is huge, we can chunk,
+    // but this keeps the code simple and reliable across browsers.
+    const text = await file.text();
+
+    // Split into lines (handle Windows newlines)
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length === 0) throw new Error("CSV appears empty.");
+
+    // Detect whether the first line is a header (contains non-numeric tokens).
+    // Our split files were written without headers, but we guard anyway.
+    const firstParts = lines[0].split(",");
+    const headerLike = firstParts.some((p) => p.trim() === "" || Number.isNaN(+p.trim()));
+    const startLine = headerLike ? 1 : 0;
+
+    // We'll build a Float32Array for all pixels: N * 4096
+    const rows = [];
+    for (let i = startLine; i < lines.length; i++) {
+      const parts = lines[i].split(",");
+      // Quick skip for obviously bad rows
+      if (parts.length < PIXELS) continue;
+      rows.push(parts);
+    }
+
+    if (rows.length === 0) throw new Error("No valid data rows found.");
+
+    // Determine row format by column count (from first valid row)
+    const colCount = rows[0].length;
+
+    const isPixelsFirst_4098 = (colCount === (PIXELS + 2)); // p0..p4095,label,character
+    const isLabelFirst_4097 = (colCount === (PIXELS + 1));  // label,p0..p4095
+    const isPixelsOnly_4096 = (colCount === PIXELS);        // p0..p4095 (no label)
+    if (!isPixelsFirst_4098 && !isLabelFirst_4097 && !isPixelsOnly_4096) {
+      throw new Error(
+        `Unexpected column count: ${colCount}. Expected 4096, 4097, or 4098 columns for 64×64 data.`
+      );
+    }
+
+    const n = rows.length;
+    const all = new Float32Array(n * PIXELS);
+
+    // Parse rows → pixels
+    // We normalize /255.
+    for (let r = 0; r < n; r++) {
+      const parts = rows[r];
+
+      let pixelStart = 0;
+      if (isLabelFirst_4097) {
+        pixelStart = 1; // skip label
+      } else {
+        pixelStart = 0; // pixels first
+      }
+
+      // For pixels-first 4098, the last 2 columns are label+character. We stop at pixelStart+4096 anyway.
+      const base = r * PIXELS;
+      for (let j = 0; j < PIXELS; j++) {
+        const v = +parts[pixelStart + j];
+        all[base + j] = (v / 255.0);
+      }
+
+      // Keep UI responsive for big files
+      if (r % 2000 === 0) await tf.nextFrame();
+    }
+
+    // Create tensor4d [N,64,64,1]
+    const xs = tf.tensor4d(all, [n, IMG_H, IMG_W, CHANNELS], "float32");
+    return xs;
+  }
+
+  // Split train/val tensors (no labels needed)
+  function splitTrainVal(xs, valRatio = 0.1) {
+    const n = xs.shape[0];
+    const valN = Math.max(1, Math.floor(n * valRatio));
+    const trainN = n - valN;
+
+    const trainXs = xs.slice([0, 0, 0, 0], [trainN, IMG_H, IMG_W, CHANNELS]);
+    const valXs = xs.slice([trainN, 0, 0, 0], [valN, IMG_H, IMG_W, CHANNELS]);
+
+    return { trainXs, valXs };
+  }
+
+  // Random batch from xs only (autoencoder doesn't require ys)
+  function getRandomBatch(xs, k = 5) {
+    const n = xs.shape[0];
+    const kk = Math.min(k, n);
+
+    const idx = new Int32Array(kk);
+    for (let i = 0; i < kk; i++) idx[i] = (Math.random() * n) | 0;
+
+    const idxTensor = tf.tensor1d(idx, "int32");
+    const batchXs = tf.gather(xs, idxTensor);
+    idxTensor.dispose();
+    return batchXs;
+  }
+
+  // Generic draw (works for any H×W)
+  function drawToCanvas(imageTensor, canvas, h, w, scale = 3) {
+    const s = scale | 0;
+    canvas.width = w * s;
+    canvas.height = h * s;
+
+    const ctx = canvas.getContext("2d");
+    const imgData = ctx.createImageData(w * s, h * s);
+
+    const data = tf.tidy(() => {
+      let t = imageTensor;
+      if (t.rank === 4) t = t.squeeze([0, 3]);     // [1,H,W,1] -> [H,W]
+      else if (t.rank === 3) t = t.squeeze([2]);   // [H,W,1]   -> [H,W]
+      return t.dataSync(); // length H*W
+    });
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const v = data[y * w + x];
+        const c = Math.max(0, Math.min(255, (v * 255) | 0));
+
+        for (let dy = 0; dy < s; dy++) {
+          for (let dx = 0; dx < s; dx++) {
+            const px = (y * s + dy) * (w * s) + (x * s + dx);
+            const o = px * 4;
+            imgData.data[o + 0] = c;
+            imgData.data[o + 1] = c;
+            imgData.data[o + 2] = c;
+            imgData.data[o + 3] = 255;
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  // ---------------------------
   // Step 1: Noise injection
   // ---------------------------
   function addRandomNoise(xs, noiseFactor = NOISE_FACTOR) {
-    // xs shape [N,28,28,1], values in [0,1]
+    // xs shape [N,64,64,1], values in [0,1]
     return tf.tidy(() => {
       const noise = tf.randomNormal(xs.shape, 0, 1, "float32");
       return xs.add(noise.mul(noiseFactor)).clipByValue(0, 1);
@@ -125,10 +284,13 @@
   }
 
   // ---------------------------
-  // Step 2: Autoencoder builder
+  // Step 2: Autoencoder builder (64×64)
   // ---------------------------
-  // Key Fix: UpSampling2D + Conv2D decoder is more stable than Conv2DTranspose in browsers.
-  // Key Fix: loss='binaryCrossentropy' with sigmoid output prevents "all black" MSE shortcut.
+  // We keep the same idea:
+  // Encoder: Conv -> Pool -> Conv -> Pool
+  // Decoder: UpSample -> Conv -> UpSample -> Conv -> Output
+  //
+  // Output uses sigmoid, loss uses BCE to avoid the "all-black" shortcut.
   function buildAutoencoder(poolType = "max") {
     const isMax = poolType === "max";
     const m = tf.sequential();
@@ -139,7 +301,7 @@
       kernelSize: 3,
       activation: "relu",
       padding: "same",
-      inputShape: [28, 28, 1]
+      inputShape: [IMG_H, IMG_W, CHANNELS]
     }));
 
     m.add(isMax
@@ -186,8 +348,6 @@
 
     m.compile({
       optimizer: tf.train.adam(1e-3),
-      // IMPORTANT FIX:
-      // BCE punishes missing bright pixels strongly and avoids trivial all-zero outputs.
       loss: "binaryCrossentropy"
     });
 
@@ -235,7 +395,7 @@
     container.appendChild(select);
 
     const summaryLines = [];
-    if (active) active.summary(100, undefined, (line) => summaryLines.push(line));
+    if (active) active.summary(200, undefined, (line) => summaryLines.push(line));
     else summaryLines.push("No model built yet.");
 
     modelInfo.innerHTML = "";
@@ -272,46 +432,43 @@
       const trainFile = trainCsvInput.files && trainCsvInput.files[0];
       const testFile = testCsvInput.files && testCsvInput.files[0];
       if (!trainFile || !testFile) {
-        throw new Error("Please select BOTH mnist_train.csv and mnist_test.csv.");
+        throw new Error("Please select BOTH train.csv and test.csv.");
       }
 
       disposeAllTensors();
+      disposeModels();
 
       setStatus(
         `Loading...\n` +
         `Train file: ${trainFile.name} (${bytesToMB(trainFile.size)} MB)\n` +
         `Test file:  ${testFile.name} (${bytesToMB(testFile.size)} MB)\n\n` +
-        `Parsing CSV → tensors...`
+        `Parsing CSV → tensors (64×64)...`
       );
 
-      log("Parsing training CSV...");
-      trainAll = await window.loadTrainFromFiles(trainFile);
+      log("Parsing training CSV (64×64)...");
+      trainXsAll = await loadXsFromCsvFile(trainFile);
       await tf.nextFrame();
 
-      log("Parsing test CSV...");
-      testAll = await window.loadTestFromFiles(testFile);
+      log("Parsing test CSV (64×64)...");
+      testXsAll = await loadXsFromCsvFile(testFile);
       await tf.nextFrame();
 
-      split = window.splitTrainVal(trainAll.xs, trainAll.ys, 0.1);
-
-      if (modelMax) modelMax.dispose();
-      if (modelAvg) modelAvg.dispose();
+      split = splitTrainVal(trainXsAll, 0.1);
 
       modelMax = buildAutoencoder("max");
       modelAvg = buildAutoencoder("avg");
-
       activeModelKey = "max";
       renderModelInfo();
 
-      const trainN = trainAll.xs.shape[0];
+      const trainN = trainXsAll.shape[0];
       const valN = split.valXs.shape[0];
-      const testN = testAll.xs.shape[0];
+      const testN = testXsAll.shape[0];
 
       setStatus(
-        `Loaded.\n` +
-        `Train: ${trainN} samples → xs ${trainAll.xs.shape}\n` +
+        `Loaded (64×64).\n` +
+        `Train: ${trainN} samples → xs ${trainXsAll.shape}\n` +
         `Val:   ${valN} samples → xs ${split.valXs.shape}\n` +
-        `Test:  ${testN} samples → xs ${testAll.xs.shape}\n\n` +
+        `Test:  ${testN} samples → xs ${testXsAll.shape}\n\n` +
         `Noise: Gaussian factor=${NOISE_FACTOR}\n` +
         `Loss: binaryCrossentropy (prevents all-black collapse)\n` +
         `Decoder: UpSampling2D + Conv2D (stable in browsers)`
@@ -333,7 +490,7 @@
   // ---------------------------
   async function trainOneModel(modelToTrain, label, trainXsClean, valXsClean) {
     const epochs = 15;
-    const batchSize = 128;
+    const batchSize = 64; // 64×64 uses more memory; 128 can be heavy on Safari.
 
     log(`Training ${label}: epochs=${epochs}, batchSize=${batchSize}, noise=${NOISE_FACTOR}`);
 
@@ -417,12 +574,10 @@
   }
 
   // ---------------------------
-  // Evaluation (simple metric for homework)
+  // Evaluation (MSE/PSNR)
   // ---------------------------
-  // We re-use the "Overall Test Accuracy" label to show reconstruction quality.
-  // We'll compute MSE just as a numeric baseline, even though training uses BCE.
   async function evaluateMSE(modelToEval, label, testXsClean) {
-    const batchSize = 512;
+    const batchSize = 128;
     const n = testXsClean.shape[0];
 
     const testXsNoisy = addRandomNoise(testXsClean, NOISE_FACTOR);
@@ -434,12 +589,11 @@
       const size = Math.min(batchSize, n - start);
 
       const mseVal = tf.tidy(() => {
-        const xClean = testXsClean.slice([start, 0, 0, 0], [size, 28, 28, 1]);
-        const xNoisy = testXsNoisy.slice([start, 0, 0, 0], [size, 28, 28, 1]);
+        const xClean = testXsClean.slice([start, 0, 0, 0], [size, IMG_H, IMG_W, CHANNELS]);
+        const xNoisy = testXsNoisy.slice([start, 0, 0, 0], [size, IMG_H, IMG_W, CHANNELS]);
         const recon = modelToEval.predict(xNoisy);
         const mse = recon.sub(xClean).square().mean();
-        const v = mse.dataSync()[0];
-        return v;
+        return mse.dataSync()[0];
       });
 
       sum += mseVal * size;
@@ -457,7 +611,7 @@
 
   async function onEvaluate() {
     if (busy) return;
-    if (!testAll || !modelMax || !modelAvg) return;
+    if (!testXsAll || !modelMax || !modelAvg) return;
 
     busy = true;
     setButtonsEnabled();
@@ -467,8 +621,8 @@
       log("Evaluating denoising performance (MSE/PSNR) on test set...");
       await tf.nextFrame();
 
-      const rMax = await evaluateMSE(modelMax, "MAX", testAll.xs);
-      const rAvg = await evaluateMSE(modelAvg, "AVG", testAll.xs);
+      const rMax = await evaluateMSE(modelMax, "MAX", testXsAll);
+      const rAvg = await evaluateMSE(modelAvg, "AVG", testXsAll);
 
       overallAcc.textContent =
         `MAX MSE ${rMax.mse.toFixed(5)} | AVG MSE ${rAvg.mse.toFixed(5)} (noise=${NOISE_FACTOR})`;
@@ -506,7 +660,7 @@
   // ---------------------------
   async function onTestFive() {
     if (busy) return;
-    if (!testAll || !modelMax || !modelAvg) return;
+    if (!testXsAll || !modelMax || !modelAvg) return;
 
     busy = true;
     setButtonsEnabled();
@@ -514,13 +668,13 @@
     try {
       clearPreview();
 
-      const { batchXs, batchYs } = window.getRandomTestBatch(testAll.xs, testAll.ys, 5);
+      const batchXs = getRandomBatch(testXsAll, 5);
       const noisyBatch = addRandomNoise(batchXs, NOISE_FACTOR);
 
       const reconMax = modelMax.predict(noisyBatch);
       const reconAvg = modelAvg.predict(noisyBatch);
 
-      // DEBUG: If these ranges are near [0,0], it will look black.
+      // Range debug: if outputs are near 0, previews look black.
       const maxMin = reconMax.min().dataSync()[0];
       const maxMax = reconMax.max().dataSync()[0];
       const avgMin = reconAvg.min().dataSync()[0];
@@ -530,7 +684,7 @@
       for (let i = 0; i < 5; i++) {
         const item = document.createElement("div");
         item.className = "previewItem";
-        item.style.minWidth = "280px";
+        item.style.minWidth = "320px";
 
         const title = document.createElement("div");
         title.style.fontSize = "11px";
@@ -549,8 +703,8 @@
           wrap.style.textAlign = "center";
 
           const c = document.createElement("canvas");
-          c.width = 28 * PREVIEW_SCALE;
-          c.height = 28 * PREVIEW_SCALE;
+          c.width = IMG_W * PREVIEW_SCALE;
+          c.height = IMG_H * PREVIEW_SCALE;
 
           const lbl = document.createElement("div");
           lbl.style.fontSize = "10px";
@@ -576,15 +730,15 @@
         item.appendChild(grid);
         previewStrip.appendChild(item);
 
-        const clean = batchXs.slice([i, 0, 0, 0], [1, 28, 28, 1]);
-        const noisy = noisyBatch.slice([i, 0, 0, 0], [1, 28, 28, 1]);
-        const dMax = reconMax.slice([i, 0, 0, 0], [1, 28, 28, 1]);
-        const dAvg = reconAvg.slice([i, 0, 0, 0], [1, 28, 28, 1]);
+        const clean = batchXs.slice([i, 0, 0, 0], [1, IMG_H, IMG_W, CHANNELS]);
+        const noisy = noisyBatch.slice([i, 0, 0, 0], [1, IMG_H, IMG_W, CHANNELS]);
+        const dMax = reconMax.slice([i, 0, 0, 0], [1, IMG_H, IMG_W, CHANNELS]);
+        const dAvg = reconAvg.slice([i, 0, 0, 0], [1, IMG_H, IMG_W, CHANNELS]);
 
-        window.draw28x28ToCanvas(clean, cleanCell.canvas, PREVIEW_SCALE);
-        window.draw28x28ToCanvas(noisy, noisyCell.canvas, PREVIEW_SCALE);
-        window.draw28x28ToCanvas(dMax, maxCell.canvas, PREVIEW_SCALE);
-        window.draw28x28ToCanvas(dAvg, avgCell.canvas, PREVIEW_SCALE);
+        drawToCanvas(clean, cleanCell.canvas, IMG_H, IMG_W, PREVIEW_SCALE);
+        drawToCanvas(noisy, noisyCell.canvas, IMG_H, IMG_W, PREVIEW_SCALE);
+        drawToCanvas(dMax, maxCell.canvas, IMG_H, IMG_W, PREVIEW_SCALE);
+        drawToCanvas(dAvg, avgCell.canvas, IMG_H, IMG_W, PREVIEW_SCALE);
 
         clean.dispose(); noisy.dispose(); dMax.dispose(); dAvg.dispose();
         await tf.nextFrame();
@@ -596,7 +750,6 @@
       reconAvg.dispose();
       noisyBatch.dispose();
       batchXs.dispose();
-      batchYs.dispose();
     } catch (err) {
       log(`ERROR (test 5): ${friendlyError(err)}`);
       setStatus(`Preview error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
@@ -618,7 +771,7 @@
     setButtonsEnabled();
 
     try {
-      const name = activeModelKey === "avg" ? "mnist-ae-avgpool" : "mnist-ae-maxpool";
+      const name = activeModelKey === "avg" ? "chinesemnist-ae-avgpool-64" : "chinesemnist-ae-maxpool-64";
       log(`Saving ACTIVE model (${activeModelKey.toUpperCase()}) to downloads as '${name}'...`);
       await active.save(`downloads://${name}`);
       log(`Model download triggered: ${name}.json + ${name}.weights.bin`);
@@ -679,20 +832,16 @@
   function disposeAllTensors() {
     if (split) {
       split.trainXs?.dispose?.();
-      split.trainYs?.dispose?.();
       split.valXs?.dispose?.();
-      split.valYs?.dispose?.();
       split = null;
     }
-    if (trainAll) {
-      trainAll.xs?.dispose?.();
-      trainAll.ys?.dispose?.();
-      trainAll = null;
+    if (trainXsAll) {
+      trainXsAll.dispose();
+      trainXsAll = null;
     }
-    if (testAll) {
-      testAll.xs?.dispose?.();
-      testAll.ys?.dispose?.();
-      testAll = null;
+    if (testXsAll) {
+      testXsAll.dispose();
+      testXsAll = null;
     }
   }
 
@@ -715,7 +864,7 @@
       activeModelKey = "max";
       renderModelInfo();
 
-      setStatus(`Reset.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
+      setStatus(`Reset.\nUpload train/test CSV files, then click Load Data.\nImage size=${IMG_H}×${IMG_W}\nNoise factor=${NOISE_FACTOR}`);
 
       trainCsvInput.value = "";
       testCsvInput.value = "";
@@ -772,14 +921,21 @@
   function boot() {
     try { tfvis.visor().close(); } catch (_) {}
 
-    setStatus(`Ready.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
+    setStatus(
+      `Ready.\nUpload train/test CSV files, then click Load Data.\n` +
+      `Image size=${IMG_H}×${IMG_W} (${PIXELS} pixels)\n` +
+      `Noise factor=${NOISE_FACTOR}`
+    );
+
     renderModelInfo();
     bindUI();
     setButtonsEnabled();
 
-    log("Autoencoder mode: Train noisy→clean. Preview shows Clean|Noisy|Denoised(Max)|Denoised(Avg).");
-    log("Fixes: BCE loss + UpSampling decoder (prevents all-black collapse).");
+    log("Autoencoder mode (64×64): Train noisy→clean. Preview shows Clean|Noisy|Denoised(Max)|Denoised(Avg).");
+    log("Loss: BCE + sigmoid output (prevents all-black collapse).");
+    log("CSV loader supports pixels-first (4098 cols) and label-first (4097 cols).");
   }
 
   boot();
 })();
+```
