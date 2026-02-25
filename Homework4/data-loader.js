@@ -1,15 +1,6 @@
 /* data-loader.js
    Dynamic CSV loader for MNIST (28×28) and ChineseMNIST (64×64)
-   ------------------------------------------------------------
-   Supports these row formats (no header):
-   1) label,p0,p1,...            (MNIST / label-first)
-   2) p0,p1,...,label            (pixels-first)
-   3) p0,p1,...,label,character  (ChineseMNIST common)
-
-   Output:
-     xs: tf.Tensor4D [N,H,W,1] float32 in [0,1]
-     ys: tf.Tensor2D [N,10] one-hot float32  (always depth 10 for compatibility)
-     meta: { imgSize, pixelCount, format }
+   Fix: handles ChineseMNIST rows where the last column (character) is NON-numeric.
 */
 
 (() => {
@@ -19,15 +10,13 @@
   window.splitTrainVal = splitTrainVal;
   window.getRandomTestBatch = getRandomTestBatch;
 
-  // Backwards-compatible name:
+  // Backwards compat + generic name
   window.draw28x28ToCanvas = (t, c, s = 4) => drawToCanvas(t, c, s);
-  // New generic name:
   window.drawToCanvas = drawToCanvas;
 
   const NUM_CLASSES = 10;
 
   function inferShapeFromColumns(colCount) {
-    // Allow: pixels only, label-first, pixels-first, pixels-first+character
     const candidates = [
       { imgSize: 28, pixelCount: 28 * 28 },
       { imgSize: 64, pixelCount: 64 * 64 },
@@ -35,49 +24,80 @@
 
     for (const c of candidates) {
       const p = c.pixelCount;
-      if (colCount === p) return { ...c, format: "pixels_only" };
-      if (colCount === p + 1) return { ...c, format: "label_first_or_pixels_first" };
-      if (colCount === p + 2) return { ...c, format: "pixels_first_plus_char" };
+      if (colCount === p)      return { ...c, format: "pixels_only" };
+      if (colCount === p + 1)  return { ...c, format: "plus_one" }; // label-first OR pixels-first+label
+      if (colCount === p + 2)  return { ...c, format: "plus_two" }; // pixels + label + character (ChineseMNIST)
     }
-    throw new Error(
-      `Unsupported column count: ${colCount}. Expected 784/785 or 4096/4097/4098 (no header).`
-    );
+    return null;
   }
 
-  function isNumericRow(parts) {
-    // Quick header detection: if any token is non-numeric (like "label"), treat as header.
-    for (let i = 0; i < parts.length; i++) {
-      const t = parts[i].trim();
-      if (t === "") return false;
-      // Allow things like "12" "12.0"
-      if (!Number.isFinite(+t)) return false;
+  // Header detection that works for ChineseMNIST:
+  // - If column count matches a known layout (784/785/4096/4097/4098),
+  //   we DO NOT require every token to be numeric.
+  // - We only require that the pixel region is numeric enough to parse.
+  function looksLikeDataRow(parts) {
+    const inferred = inferShapeFromColumns(parts.length);
+    if (!inferred) return false; // unknown layout, probably header/bad row
+
+    const p = inferred.pixelCount;
+
+    // Check that at least the first few pixel tokens are numeric (fast and robust)
+    // For label-first, pixels start at 1; for pixels-first, pixels start at 0.
+    // For plus_two, pixels definitely start at 0.
+    const checkCount = 12; // quick sanity, not full validation
+    if (parts.length === p) {
+      // pixels only
+      for (let i = 0; i < Math.min(checkCount, p); i++) if (!Number.isFinite(+parts[i])) return false;
+      return true;
     }
-    return true;
+
+    if (parts.length === p + 2) {
+      // pixels..., label, character (character may be non-numeric)
+      for (let i = 0; i < Math.min(checkCount, p); i++) if (!Number.isFinite(+parts[i])) return false;
+      return true;
+    }
+
+    // parts.length === p + 1 (ambiguous)
+    // Accept if either:
+    // - label-first: parts[0] numeric 0..9 and next pixels numeric
+    // - pixels-first: first pixels numeric and last token numeric 0..9
+    const a = +parts[0];
+    const b = +parts[parts.length - 1];
+
+    const labelFirstOk =
+      Number.isFinite(a) &&
+      Number.isInteger(a) &&
+      a >= 0 && a <= 9 &&
+      Number.isFinite(+parts[1]);
+
+    const pixelsFirstOk =
+      Number.isFinite(+parts[0]) &&
+      Number.isFinite(+parts[1]) &&
+      Number.isFinite(b) &&
+      Number.isInteger(b) &&
+      b >= 0 && b <= 9;
+
+    return labelFirstOk || pixelsFirstOk;
   }
 
   async function loadCsvToTensors(file, { kind = "data" } = {}) {
     if (!file) throw new Error(`No ${kind} CSV file provided.`);
 
-    // Read file in chunks to avoid Safari choking on huge text()
     const decoder = new TextDecoder("utf-8");
     const CHUNK_BYTES = 8 * 1024 * 1024;
     let offset = 0;
     let carry = "";
 
-    // We don't know row count in advance → store chunks
     let imageChunks = [];
     let labelChunks = [];
     let rowCount = 0;
 
-    // Determined after first valid row
     let imgSize = null;
     let pixelCount = null;
-    let rowFormat = null;
 
-    // Staging buffers (reused)
     const BATCH_ROWS = 1024;
-    let stagingPixels = null; // Float32Array
-    let stagingLabels = null; // Uint8Array
+    let stagingPixels = null;
+    let stagingLabels = null;
     let stagingCount = 0;
 
     function ensureStaging() {
@@ -96,23 +116,21 @@
     }
 
     function parseRow(parts, lineNo) {
-      // Initialize shape/format from first valid row
+      // infer shape once
       if (pixelCount == null) {
         const inferred = inferShapeFromColumns(parts.length);
+        if (!inferred) throw new Error(`Row ${lineNo}: unsupported column count ${parts.length}.`);
         imgSize = inferred.imgSize;
         pixelCount = inferred.pixelCount;
-        rowFormat = inferred.format;
         ensureStaging();
       }
 
-      // If shapes don’t match after inference, error out clearly.
       if (![pixelCount, pixelCount + 1, pixelCount + 2].includes(parts.length)) {
         throw new Error(
           `Row ${lineNo}: column count ${parts.length} does not match expected ${pixelCount}/${pixelCount + 1}/${pixelCount + 2}.`
         );
       }
 
-      // Decide where pixels start + where label is.
       let label = 0;
       let pixelStart = 0;
 
@@ -125,34 +143,27 @@
         label = (+parts[pixelCount]) | 0;
         pixelStart = 0;
       } else {
-        // pixelCount + 1: ambiguous (could be label-first OR pixels-first-with-label)
-        // Heuristic: if first token is integer 0..9 and last token looks like pixel (0..255),
-        // assume label-first. Otherwise if last token is 0..9 and first looks like pixel, assume pixels-first.
+        // pixelCount + 1 ambiguous
         const a = +parts[0];
         const b = +parts[parts.length - 1];
+
         const firstLooksLikeLabel = Number.isInteger(a) && a >= 0 && a <= 9;
-        const lastLooksLikeLabel = Number.isInteger(b) && b >= 0 && b <= 9;
+        const lastLooksLikeLabel  = Number.isInteger(b) && b >= 0 && b <= 9;
 
-        const firstLooksLikePixel = a >= 0 && a <= 255;
-        const lastLooksLikePixel = b >= 0 && b <= 255;
-
-        if (firstLooksLikeLabel && lastLooksLikePixel) {
+        if (firstLooksLikeLabel) {
           label = a | 0;
           pixelStart = 1;
-        } else if (lastLooksLikeLabel && firstLooksLikePixel) {
+        } else if (lastLooksLikeLabel) {
           label = b | 0;
           pixelStart = 0;
         } else {
-          // default to label-first (MNIST convention)
-          label = a | 0;
+          // default to label-first
+          label = (Number.isFinite(a) ? a : 0) | 0;
           pixelStart = 1;
         }
       }
 
-      // Clamp label into 0..9 to satisfy oneHot depth=10
-      if (!Number.isFinite(label)) label = 0;
       label = Math.max(0, Math.min(9, label | 0));
-
       stagingLabels[stagingCount] = label;
 
       const base = stagingCount * pixelCount;
@@ -163,7 +174,6 @@
 
       stagingCount++;
       rowCount++;
-
       if (stagingCount >= BATCH_ROWS) flushStaging();
     }
 
@@ -186,10 +196,8 @@
 
         const parts = line.split(",").map((s) => s.trim());
 
-        // Skip header row if detected
-        if (pixelCount == null) {
-          if (!isNumericRow(parts)) continue;
-        }
+        // Skip header ONLY if it doesn't look like a valid data row.
+        if (pixelCount == null && !looksLikeDataRow(parts)) continue;
 
         parseRow(parts, lineNo);
       }
@@ -199,54 +207,42 @@
 
     carry += decoder.decode();
     if (carry.trim()) {
-      const tailLines = carry.split(/\n/);
-      for (const raw of tailLines) {
+      for (const raw of carry.split(/\n/)) {
         lineNo++;
         const line = raw.trim();
         if (!line) continue;
         const parts = line.split(",").map((s) => s.trim());
-        if (pixelCount == null) {
-          if (!isNumericRow(parts)) continue;
-        }
+        if (pixelCount == null && !looksLikeDataRow(parts)) continue;
         parseRow(parts, lineNo);
       }
     }
 
     flushStaging();
 
-    if (!rowCount) throw new Error(`No rows parsed from ${kind} file.`);
+    if (!rowCount) throw new Error(`No rows parsed from ${kind} file`);
 
-    // Flatten chunks
     const images = concatFloat32(imageChunks, rowCount * pixelCount);
     const labels = concatUint8(labelChunks, rowCount);
 
-    // Build tensors
     const xs = tf.tensor4d(images, [rowCount, imgSize, imgSize, 1], "float32");
-
     const labelTensor = tf.tensor1d(labels, "int32");
     const ys = tf.oneHot(labelTensor, NUM_CLASSES).toFloat();
     labelTensor.dispose();
 
-    return { xs, ys, meta: { imgSize, pixelCount, format: rowFormat } };
+    return { xs, ys, meta: { imgSize, pixelCount } };
   }
 
   function concatFloat32(chunks, totalLength) {
     const out = new Float32Array(totalLength);
     let off = 0;
-    for (const c of chunks) {
-      out.set(c, off);
-      off += c.length;
-    }
+    for (const c of chunks) { out.set(c, off); off += c.length; }
     return out;
   }
 
   function concatUint8(chunks, totalLength) {
     const out = new Uint8Array(totalLength);
     let off = 0;
-    for (const c of chunks) {
-      out.set(c, off);
-      off += c.length;
-    }
+    for (const c of chunks) { out.set(c, off); off += c.length; }
     return out;
   }
 
@@ -259,10 +255,10 @@
     const w = xs.shape[2];
 
     const trainXs = xs.slice([0, 0, 0, 0], [trainN, h, w, 1]);
-    const valXs = xs.slice([trainN, 0, 0, 0], [valN, h, w, 1]);
+    const valXs   = xs.slice([trainN, 0, 0, 0], [valN, h, w, 1]);
 
     const trainYs = ys.slice([0, 0], [trainN, NUM_CLASSES]);
-    const valYs = ys.slice([trainN, 0], [valN, NUM_CLASSES]);
+    const valYs   = ys.slice([trainN, 0], [valN, NUM_CLASSES]);
 
     return { trainXs, trainYs, valXs, valYs };
   }
@@ -281,16 +277,13 @@
   }
 
   function drawToCanvas(imageTensor, canvas, scale = 3) {
-    // imageTensor: [H,W] or [H,W,1] or [1,H,W,1]
     const s = scale | 0;
 
     const { h, w, data } = tf.tidy(() => {
       let t = imageTensor;
       if (t.rank === 4) t = t.squeeze([0, 3]);
       else if (t.rank === 3) t = t.squeeze([2]);
-      const hh = t.shape[0];
-      const ww = t.shape[1];
-      return { h: hh, w: ww, data: t.dataSync() };
+      return { h: t.shape[0], w: t.shape[1], data: t.dataSync() };
     });
 
     canvas.width = w * s;
