@@ -1,16 +1,17 @@
 // app.js
 // MNIST TF.js — DENOISING CNN AUTOENCODER (Browser-only, CSV Upload + Downloads Save/Load)
 // -------------------------------------------------------------------------------------
-// Changes requested:
-// ✅ Preview layout fix: make each preview card wide enough + use max-content columns
-// ✅ Faster training defaults: WebGL backend + batchSize=256 + epochs=8
+// Fixes applied vs. previous version:
+// 1) Prevent "all black" trivial solution by using loss='binaryCrossentropy' (sigmoid output).
+// 2) Use stable decoder: UpSampling2D + Conv2D (instead of Conv2DTranspose).
+// 3) Reduce noise for smaller dataset subsets (6000 train): NOISE_FACTOR=0.25
+// 4) Add reconstruction range logging (min/max) to confirm outputs are not near-zero.
 //
-// Notes:
-// - Requires data-loader.js functions on window:
-//   loadTrainFromFiles, loadTestFromFiles, splitTrainVal, getRandomTestBatch, draw28x28ToCanvas
-// - Trains TWO autoencoders (MaxPool + AvgPool) to compare denoising behavior.
-// - Training objective: noisy -> clean (autoencoder), loss = binaryCrossentropy (stable, avoids trivial all-black).
-// - Save/Load is file-based only (downloads:// and tf.io.browserFiles).
+// Homework mapping:
+// Step 1: addRandomNoise() applied to test + training inputs.
+// Step 2: train autoencoders (max pooling and avg pooling) noisy->clean.
+// Step 3: Test 5 Random shows Clean | Noisy | Denoised(Max) | Denoised(Avg)
+// Step 4: Save/Load active model using downloads:// and browserFiles().
 
 (() => {
   // ---------------------------
@@ -50,24 +51,18 @@
   let testAll = null;  // {xs, ys}
   let split = null;    // {trainXs, trainYs, valXs, valYs} -- we use xs only
 
-  // Two models for comparison
   let modelMax = null;
   let modelAvg = null;
 
-  // Which model is "active" for Save/Load/Eval slot
   let activeModelKey = "max"; // "max" | "avg"
-
   let busy = false;
 
-  // Noise factor (gentle enough for 6k train subset; change if needed)
+  // IMPORTANT FIX:
+  // With only 6000 training samples, noise=0.4 often encourages the trivial solution (all zeros).
+  // Use a slightly gentler noise for stable learning.
   const NOISE_FACTOR = 0.25;
 
-  // Preview scaling (28x28 -> canvas)
   const PREVIEW_SCALE = 4;
-
-  // Training speed defaults (requested)
-  const TRAIN_EPOCHS = 8;
-  const TRAIN_BATCH = 256;
 
   // ---------------------------
   // Utility: logging + status
@@ -122,7 +117,7 @@
   // Step 1: Noise injection
   // ---------------------------
   function addRandomNoise(xs, noiseFactor = NOISE_FACTOR) {
-    // xs: [N,28,28,1] in [0,1]
+    // xs shape [N,28,28,1], values in [0,1]
     return tf.tidy(() => {
       const noise = tf.randomNormal(xs.shape, 0, 1, "float32");
       return xs.add(noise.mul(noiseFactor)).clipByValue(0, 1);
@@ -132,8 +127,8 @@
   // ---------------------------
   // Step 2: Autoencoder builder
   // ---------------------------
-  // Stable decoder: UpSampling2D + Conv2D (browser-friendly)
-  // Loss: BCE + sigmoid output helps avoid trivial all-zero outputs.
+  // Key Fix: UpSampling2D + Conv2D decoder is more stable than Conv2DTranspose in browsers.
+  // Key Fix: loss='binaryCrossentropy' with sigmoid output prevents "all black" MSE shortcut.
   function buildAutoencoder(poolType = "max") {
     const isMax = poolType === "max";
     const m = tf.sequential();
@@ -164,7 +159,7 @@
       : tf.layers.averagePooling2d({ poolSize: 2, strides: 2 })
     );
 
-    // Decoder
+    // Decoder (UpSampling + Conv)
     m.add(tf.layers.upSampling2d({ size: [2, 2] }));
     m.add(tf.layers.conv2d({
       filters: 64,
@@ -181,7 +176,7 @@
       padding: "same"
     }));
 
-    // Output: [0,1]
+    // Output layer: sigmoid → [0,1]
     m.add(tf.layers.conv2d({
       filters: 1,
       kernelSize: 3,
@@ -191,6 +186,8 @@
 
     m.compile({
       optimizer: tf.train.adam(1e-3),
+      // IMPORTANT FIX:
+      // BCE punishes missing bright pixels strongly and avoids trivial all-zero outputs.
       loss: "binaryCrossentropy"
     });
 
@@ -316,9 +313,8 @@
         `Val:   ${valN} samples → xs ${split.valXs.shape}\n` +
         `Test:  ${testN} samples → xs ${testAll.xs.shape}\n\n` +
         `Noise: Gaussian factor=${NOISE_FACTOR}\n` +
-        `Loss: binaryCrossentropy (avoid all-black)\n` +
-        `Backend: ${tf.getBackend()}\n` +
-        `Train speed defaults: epochs=${TRAIN_EPOCHS}, batch=${TRAIN_BATCH}`
+        `Loss: binaryCrossentropy (prevents all-black collapse)\n` +
+        `Decoder: UpSampling2D + Conv2D (stable in browsers)`
       );
 
       log(`Data ready. Train=${trainN}, Val=${valN}, Test=${testN}`);
@@ -333,19 +329,17 @@
   }
 
   // ---------------------------
-  // Training (faster defaults)
+  // Training
   // ---------------------------
   async function trainOneModel(modelToTrain, label, trainXsClean, valXsClean) {
-    // Requested speed settings
-    const epochs = TRAIN_EPOCHS;
-    const batchSize = TRAIN_BATCH;
+    const epochs = 15;
+    const batchSize = 128;
 
-    log(`Training ${label}: epochs=${epochs}, batchSize=${batchSize}, noise=${NOISE_FACTOR}, backend=${tf.getBackend()}`);
+    log(`Training ${label}: epochs=${epochs}, batchSize=${batchSize}, noise=${NOISE_FACTOR}`);
 
     const t0 = performance.now();
 
     // Create noisy inputs; targets remain clean.
-    // (We generate once per training call for speed and simplicity.)
     const noisyTrainXs = addRandomNoise(trainXsClean, NOISE_FACTOR);
     const noisyValXs = addRandomNoise(valXsClean, NOISE_FACTOR);
 
@@ -423,9 +417,10 @@
   }
 
   // ---------------------------
-  // Evaluation (simple metric)
+  // Evaluation (simple metric for homework)
   // ---------------------------
-  // We compute MSE/PSNR for a numeric comparison (even though training uses BCE).
+  // We re-use the "Overall Test Accuracy" label to show reconstruction quality.
+  // We'll compute MSE just as a numeric baseline, even though training uses BCE.
   async function evaluateMSE(modelToEval, label, testXsClean) {
     const batchSize = 512;
     const n = testXsClean.shape[0];
@@ -443,7 +438,8 @@
         const xNoisy = testXsNoisy.slice([start, 0, 0, 0], [size, 28, 28, 1]);
         const recon = modelToEval.predict(xNoisy);
         const mse = recon.sub(xClean).square().mean();
-        return mse.dataSync()[0];
+        const v = mse.dataSync()[0];
+        return v;
       });
 
       sum += mseVal * size;
@@ -506,7 +502,7 @@
   }
 
   // ---------------------------
-  // Step 3: Test 5 Random preview (layout fixed)
+  // Step 3: Test 5 Random preview
   // ---------------------------
   async function onTestFive() {
     if (busy) return;
@@ -524,7 +520,7 @@
       const reconMax = modelMax.predict(noisyBatch);
       const reconAvg = modelAvg.predict(noisyBatch);
 
-      // Debug ranges (helps detect "all black" collapse quickly)
+      // DEBUG: If these ranges are near [0,0], it will look black.
       const maxMin = reconMax.min().dataSync()[0];
       const maxMax = reconMax.max().dataSync()[0];
       const avgMin = reconAvg.min().dataSync()[0];
@@ -534,10 +530,7 @@
       for (let i = 0; i < 5; i++) {
         const item = document.createElement("div");
         item.className = "previewItem";
-
-        // ✅ FIX: Make the card wide enough for 4 canvases (4*112=448 + gaps/labels)
-        item.style.minWidth = "520px";
-        item.style.width = "max-content";
+        item.style.minWidth = "280px";
 
         const title = document.createElement("div");
         title.style.fontSize = "11px";
@@ -548,14 +541,8 @@
 
         const grid = document.createElement("div");
         grid.style.display = "grid";
-
-        // ✅ FIX: Don't squeeze into 1fr columns; use max-content so each canvas keeps its size
-        grid.style.gridTemplateColumns = "repeat(4, max-content)";
-        grid.style.justifyContent = "center";
+        grid.style.gridTemplateColumns = "repeat(4, 1fr)";
         grid.style.gap = "6px";
-
-        // Safety: if the card ever becomes smaller, allow horizontal scroll inside the card
-        grid.style.overflowX = "auto";
 
         const makeCell = (labelText) => {
           const wrap = document.createElement("div");
@@ -599,11 +586,7 @@
         window.draw28x28ToCanvas(dMax, maxCell.canvas, PREVIEW_SCALE);
         window.draw28x28ToCanvas(dAvg, avgCell.canvas, PREVIEW_SCALE);
 
-        clean.dispose();
-        noisy.dispose();
-        dMax.dispose();
-        dAvg.dispose();
-
+        clean.dispose(); noisy.dispose(); dMax.dispose(); dAvg.dispose();
         await tf.nextFrame();
       }
 
@@ -665,6 +648,7 @@
 
       const loaded = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, binFile]));
 
+      // Compile for eval/further training
       loaded.compile({
         optimizer: tf.train.adam(1e-3),
         loss: "binaryCrossentropy"
@@ -783,39 +767,19 @@
   }
 
   // ---------------------------
-  // Boot (WebGL for speed)
+  // Boot
   // ---------------------------
-  async function boot() {
+  function boot() {
     try { tfvis.visor().close(); } catch (_) {}
 
-    // ✅ Requested: use WebGL for faster training/inference
-    // If WebGL isn't available, TF.js will throw; we fall back gracefully.
-    try {
-      await tf.setBackend("webgl");
-      await tf.ready();
-      log(`Backend set to ${tf.getBackend()} (expected: webgl).`);
-    } catch (e) {
-      await tf.setBackend("cpu");
-      await tf.ready();
-      log(`WebGL not available; fell back to ${tf.getBackend()}.`);
-    }
-
-    setStatus(
-      `Ready.\nUpload train/test CSV files, then click Load Data.\n` +
-      `Noise factor=${NOISE_FACTOR}\n` +
-      `Backend=${tf.getBackend()}\n` +
-      `Train defaults: epochs=${TRAIN_EPOCHS}, batch=${TRAIN_BATCH}`
-    );
-
+    setStatus(`Ready.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
     renderModelInfo();
     bindUI();
     setButtonsEnabled();
 
     log("Autoencoder mode: Train noisy→clean. Preview shows Clean|Noisy|Denoised(Max)|Denoised(Avg).");
-    log("Speed: WebGL backend + batch=256 + epochs=8.");
-    log("UI fix: preview cards widened + grid uses max-content columns (so Avg column won't be clipped).");
+    log("Fixes: BCE loss + UpSampling decoder (prevents all-black collapse).");
   }
 
-  // Start
   boot();
 })();
