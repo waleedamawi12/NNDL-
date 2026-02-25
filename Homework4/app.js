@@ -1,75 +1,72 @@
 // app.js
-// Browser-only TensorFlow.js Autoencoder demo that uses the shared data-loader.js
-// -----------------------------------------------------------------------------
-// This file is intentionally "dumb about CSV". All CSV parsing + shape inference
-// (28×28 MNIST or 64×64 ChineseMNIST) is done in data-loader.js.
+// MNIST TF.js — DENOISING CNN AUTOENCODER (Browser-only, CSV Upload + Downloads Save/Load)
+// -------------------------------------------------------------------------------------
+// Fixes applied vs. previous version:
+// 1) Prevent "all black" trivial solution by using loss='binaryCrossentropy' (sigmoid output).
+// 2) Use stable decoder: UpSampling2D + Conv2D (instead of Conv2DTranspose).
+// 3) Reduce noise for smaller dataset subsets (6000 train): NOISE_FACTOR=0.25
+// 4) Add reconstruction range logging (min/max) to confirm outputs are not near-zero.
 //
-// Required functions provided by data-loader.js (make sure index.html loads it first):
-//   - loadTrainFromFiles(file) -> { xs, ys, meta:{imgSize,pixelCount,format} }
-//   - loadTestFromFiles(file)  -> { xs, ys, meta:{imgSize,pixelCount,format} }
-//   - splitTrainVal(xs, ys, valRatio) -> { trainXs, trainYs, valXs, valYs }
-//   - getRandomTestBatch(xs, ys, k) -> { batchXs, batchYs }
-//   - drawToCanvas(tensor, canvas, scale) OR drawImageToCanvas(tensor, canvas, scale)
-//
-// IMPORTANT:
-// - This app is an AUTOENCODER: targets are images themselves (ys is ignored).
-// - We show reconstruction loss (MSE) during evaluation and preview reconstructions.
-//
-// Notes:
-// - If you want classification later, you can reuse ys and switch model/loss.
+// Homework mapping:
+// Step 1: addRandomNoise() applied to test + training inputs.
+// Step 2: train autoencoders (max pooling and avg pooling) noisy->clean.
+// Step 3: Test 5 Random shows Clean | Noisy | Denoised(Max) | Denoised(Avg)
+// Step 4: Save/Load active model using downloads:// and browserFiles().
 
 (() => {
-  // -----------------------------
-  // DOM helpers
-  // -----------------------------
+  // ---------------------------
+  // DOM helpers / UI elements
+  // ---------------------------
   const el = (id) => document.getElementById(id);
 
-  // File inputs (must match your index.html ids)
   const trainCsvInput = el("trainCsv");
-  const testCsvInput  = el("testCsv");
+  const testCsvInput = el("testCsv");
   const trainName = el("trainName");
-  const testName  = el("testName");
+  const testName = el("testName");
 
-  // Buttons
   const btnLoadData = el("btnLoadData");
-  const btnTrain    = el("btnTrain");
-  const btnEval     = el("btnEval");
-  const btnTest5    = el("btnTest5");
-  const btnSave     = el("btnSave");
-  const btnLoadModel= el("btnLoadModel");
-  const btnReset    = el("btnReset");
+  const btnTrain = el("btnTrain");
+  const btnEval = el("btnEval");
+  const btnTest5 = el("btnTest5");
+  const btnSave = el("btnSave");
   const btnToggleVisor = el("btnToggleVisor");
+  const btnReset = el("btnReset");
+  const btnLoadModel = el("btnLoadModel");
 
-  // Model load inputs
   const modelJsonInput = el("modelJson");
-  const modelBinInput  = el("modelBin");
+  const modelBinInput = el("modelBin");
   const jsonName = el("jsonName");
-  const binName  = el("binName");
+  const binName = el("binName");
 
-  // Output areas
-  const dataStatus  = el("dataStatus");
-  const trainLogs   = el("trainLogs");
-  const overallAcc  = el("overallAcc");   // we will display "Test MSE" here
-  const previewStrip= el("previewStrip");
-  const modelInfo   = el("modelInfo");
+  const dataStatus = el("dataStatus");
+  const trainLogs = el("trainLogs");
+  const overallAcc = el("overallAcc");
+  const previewStrip = el("previewStrip");
+  const modelInfo = el("modelInfo");
 
-  // -----------------------------
-  // App state
-  // -----------------------------
-  let trainXsAll = null;
-  let testXsAll  = null;
-  let split = null; // {trainXs,valXs}
-  let model = null;
+  // ---------------------------
+  // App state (tensors + models)
+  // ---------------------------
+  let trainAll = null; // {xs, ys}
+  let testAll = null;  // {xs, ys}
+  let split = null;    // {trainXs, trainYs, valXs, valYs} -- we use xs only
 
-  // Dynamic image size (28 or 64) determined from data-loader output
-  let IMG_SIZE = 28;
+  let modelMax = null;
+  let modelAvg = null;
 
-  // Anti-double-click guard
+  let activeModelKey = "max"; // "max" | "avg"
   let busy = false;
 
-  // -----------------------------
-  // UI helpers
-  // -----------------------------
+  // IMPORTANT FIX:
+  // With only 6000 training samples, noise=0.4 often encourages the trivial solution (all zeros).
+  // Use a slightly gentler noise for stable learning.
+  const NOISE_FACTOR = 0.25;
+
+  const PREVIEW_SCALE = 4;
+
+  // ---------------------------
+  // Utility: logging + status
+  // ---------------------------
   function setStatus(text) {
     dataStatus.textContent = text;
   }
@@ -88,75 +85,52 @@
     previewStrip.innerHTML = "";
   }
 
+  function getActiveModel() {
+    return activeModelKey === "avg" ? modelAvg : modelMax;
+  }
+
   function setButtonsEnabled() {
-    const hasData = !!(trainXsAll && testXsAll && split);
-    const hasModel = !!model;
+    const hasData = !!(trainAll && testAll && split);
+    const hasAnyModel = !!(modelMax || modelAvg);
+    const active = getActiveModel();
+
+    btnTrain.disabled = !hasData || busy;
+    btnEval.disabled = !hasData || !hasAnyModel || busy;
+    btnTest5.disabled = !hasData || !hasAnyModel || busy;
+    btnSave.disabled = !active || busy;
 
     btnLoadData.disabled = busy;
-    btnTrain.disabled = !hasData || !hasModel || busy;
-    btnEval.disabled  = !hasData || !hasModel || busy;
-    btnTest5.disabled = !hasData || !hasModel || busy;
-    btnSave.disabled  = !hasModel || busy;
     btnLoadModel.disabled = busy;
     btnReset.disabled = busy;
   }
 
-  function renderModelSummary() {
-    if (!model) {
-      modelInfo.textContent = "—";
-      return;
-    }
-    const lines = [];
-    model.summary(200, undefined, (line) => lines.push(line));
-    modelInfo.textContent = lines.join("\n");
+  function friendlyError(err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    return msg.replace(/\s+/g, " ").trim();
   }
 
-  function showOrToggleVisor() {
-    const visor = tfvis.visor();
-    visor.isOpen() ? visor.close() : visor.open();
+  function bytesToMB(x) {
+    return (x / (1024 * 1024)).toFixed(1);
   }
 
-  // -----------------------------
-  // Memory cleanup
-  // -----------------------------
-  function disposeTensors() {
-    // Split tensors
-    if (split) {
-      split.trainXs?.dispose?.();
-      split.trainYs?.dispose?.(); // may exist but unused
-      split.valXs?.dispose?.();
-      split.valYs?.dispose?.();   // may exist but unused
-      split = null;
-    }
-    // Full datasets
-    trainXsAll?.dispose?.(); trainXsAll = null;
-    testXsAll?.dispose?.();  testXsAll = null;
+  // ---------------------------
+  // Step 1: Noise injection
+  // ---------------------------
+  function addRandomNoise(xs, noiseFactor = NOISE_FACTOR) {
+    // xs shape [N,28,28,1], values in [0,1]
+    return tf.tidy(() => {
+      const noise = tf.randomNormal(xs.shape, 0, 1, "float32");
+      return xs.add(noise.mul(noiseFactor)).clipByValue(0, 1);
+    });
   }
 
-  function disposeModel() {
-    if (model) {
-      model.dispose();
-      model = null;
-    }
-    renderModelSummary();
-  }
-
-  function resetUI() {
-    clearLogs();
-    clearPreview();
-    overallAcc.textContent = "—";
-  }
-
-  // -----------------------------
-  // Model (Autoencoder)
-  // -----------------------------
-  function buildAutoencoder(imgSize) {
-    // Simple, stable autoencoder:
-    // Encoder: Conv -> Pool -> Conv -> Pool
-    // Decoder: UpSample -> Conv -> UpSample -> Conv -> Output
-    //
-    // Output uses sigmoid so pixels are predicted in [0,1].
-    // Loss uses binaryCrossentropy; for grayscale 0..1 this works well and avoids "all black" collapse.
+  // ---------------------------
+  // Step 2: Autoencoder builder
+  // ---------------------------
+  // Key Fix: UpSampling2D + Conv2D decoder is more stable than Conv2DTranspose in browsers.
+  // Key Fix: loss='binaryCrossentropy' with sigmoid output prevents "all black" MSE shortcut.
+  function buildAutoencoder(poolType = "max") {
+    const isMax = poolType === "max";
     const m = tf.sequential();
 
     // Encoder
@@ -165,9 +139,13 @@
       kernelSize: 3,
       activation: "relu",
       padding: "same",
-      inputShape: [imgSize, imgSize, 1]
+      inputShape: [28, 28, 1]
     }));
-    m.add(tf.layers.maxPooling2d({ poolSize: 2, strides: 2 }));
+
+    m.add(isMax
+      ? tf.layers.maxPooling2d({ poolSize: 2, strides: 2 })
+      : tf.layers.averagePooling2d({ poolSize: 2, strides: 2 })
+    );
 
     m.add(tf.layers.conv2d({
       filters: 64,
@@ -175,9 +153,13 @@
       activation: "relu",
       padding: "same"
     }));
-    m.add(tf.layers.maxPooling2d({ poolSize: 2, strides: 2 }));
 
-    // Decoder
+    m.add(isMax
+      ? tf.layers.maxPooling2d({ poolSize: 2, strides: 2 })
+      : tf.layers.averagePooling2d({ poolSize: 2, strides: 2 })
+    );
+
+    // Decoder (UpSampling + Conv)
     m.add(tf.layers.upSampling2d({ size: [2, 2] }));
     m.add(tf.layers.conv2d({
       filters: 64,
@@ -194,7 +176,7 @@
       padding: "same"
     }));
 
-    // Output: 1 channel grayscale
+    // Output layer: sigmoid → [0,1]
     m.add(tf.layers.conv2d({
       filters: 1,
       kernelSize: 3,
@@ -203,85 +185,202 @@
     }));
 
     m.compile({
-      optimizer: "adam",
+      optimizer: tf.train.adam(1e-3),
+      // IMPORTANT FIX:
+      // BCE punishes missing bright pixels strongly and avoids trivial all-zero outputs.
       loss: "binaryCrossentropy"
     });
 
     return m;
   }
 
-  // -----------------------------
-  // Data loading (USING data-loader.js)
-  // -----------------------------
+  // ---------------------------
+  // Model info rendering + selector (no index.html edits)
+  // ---------------------------
+  function renderModelInfo() {
+    const active = getActiveModel();
+
+    const container = document.createElement("div");
+    container.style.display = "flex";
+    container.style.alignItems = "center";
+    container.style.justifyContent = "space-between";
+    container.style.gap = "10px";
+    container.style.marginBottom = "10px";
+
+    const title = document.createElement("div");
+    title.textContent = "Active model for Save/Eval:";
+    title.style.fontSize = "11px";
+    title.style.color = "#93a4c7";
+
+    const select = document.createElement("select");
+    select.style.background = "rgba(255,255,255,.06)";
+    select.style.border = "1px solid rgba(255,255,255,.14)";
+    select.style.borderRadius = "10px";
+    select.style.color = "#e8eeff";
+    select.style.padding = "8px 10px";
+    select.style.fontSize = "12px";
+    select.innerHTML = `
+      <option value="max">Autoencoder (Max Pooling)</option>
+      <option value="avg">Autoencoder (Avg Pooling)</option>
+    `;
+    select.value = activeModelKey;
+    select.addEventListener("change", () => {
+      activeModelKey = select.value;
+      renderModelInfo();
+      setButtonsEnabled();
+      log(`Active model switched to: ${activeModelKey.toUpperCase()} pooling`);
+    });
+
+    container.appendChild(title);
+    container.appendChild(select);
+
+    const summaryLines = [];
+    if (active) active.summary(100, undefined, (line) => summaryLines.push(line));
+    else summaryLines.push("No model built yet.");
+
+    modelInfo.innerHTML = "";
+    modelInfo.appendChild(container);
+
+    const pre = document.createElement("pre");
+    pre.style.margin = "0";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = summaryLines.join("\n");
+    modelInfo.appendChild(pre);
+  }
+
+  // ---------------------------
+  // tfjs-vis visor toggle
+  // ---------------------------
+  function showOrToggleVisor() {
+    const visor = tfvis.visor();
+    visor.isOpen() ? visor.close() : visor.open();
+  }
+
+  // ---------------------------
+  // Data loading
+  // ---------------------------
   async function onLoadData() {
     if (busy) return;
     busy = true;
     setButtonsEnabled();
 
     try {
-      resetUI();
-      disposeTensors();
-      disposeModel();
+      clearLogs();
+      clearPreview();
+      overallAcc.textContent = "—";
 
-      const trainFile = trainCsvInput?.files?.[0];
-      const testFile  = testCsvInput?.files?.[0];
-
+      const trainFile = trainCsvInput.files && trainCsvInput.files[0];
+      const testFile = testCsvInput.files && testCsvInput.files[0];
       if (!trainFile || !testFile) {
-        throw new Error("Please select BOTH Train CSV and Test CSV.");
+        throw new Error("Please select BOTH mnist_train.csv and mnist_test.csv.");
       }
+
+      disposeAllTensors();
 
       setStatus(
         `Loading...\n` +
-        `Train: ${trainFile.name}\n` +
-        `Test:  ${testFile.name}\n\n` +
-        `Parsing CSV via data-loader.js...`
+        `Train file: ${trainFile.name} (${bytesToMB(trainFile.size)} MB)\n` +
+        `Test file:  ${testFile.name} (${bytesToMB(testFile.size)} MB)\n\n` +
+        `Parsing CSV → tensors...`
       );
-      log("Loading train CSV via data-loader.js...");
-      const trainData = await window.loadTrainFromFiles(trainFile);
 
-      log("Loading test CSV via data-loader.js...");
-      const testData  = await window.loadTestFromFiles(testFile);
+      log("Parsing training CSV...");
+      trainAll = await window.loadTrainFromFiles(trainFile);
+      await tf.nextFrame();
 
-      // We only need xs for autoencoder (ys can exist, but unused)
-      trainXsAll = trainData.xs;
-      testXsAll  = testData.xs;
+      log("Parsing test CSV...");
+      testAll = await window.loadTestFromFiles(testFile);
+      await tf.nextFrame();
 
-      // Detect image size dynamically (28 or 64)
-      IMG_SIZE = trainData?.meta?.imgSize || trainXsAll.shape[1];
+      split = window.splitTrainVal(trainAll.xs, trainAll.ys, 0.1);
 
-      // We split using helper. It expects xs,ys but ys may be irrelevant.
-      // Pass trainData.ys so the function works unchanged.
-      split = window.splitTrainVal(trainXsAll, trainData.ys, 0.1);
+      if (modelMax) modelMax.dispose();
+      if (modelAvg) modelAvg.dispose();
 
-      // Build model for detected size
-      model = buildAutoencoder(IMG_SIZE);
-      renderModelSummary();
+      modelMax = buildAutoencoder("max");
+      modelAvg = buildAutoencoder("avg");
+
+      activeModelKey = "max";
+      renderModelInfo();
+
+      const trainN = trainAll.xs.shape[0];
+      const valN = split.valXs.shape[0];
+      const testN = testAll.xs.shape[0];
 
       setStatus(
         `Loaded.\n` +
-        `Train xs: ${trainXsAll.shape}\n` +
-        `Val xs:   ${split.valXs.shape}\n` +
-        `Test xs:  ${testXsAll.shape}\n` +
-        `Image size detected: ${IMG_SIZE}×${IMG_SIZE}\n\n` +
-        `Autoencoder mode: target = input image`
+        `Train: ${trainN} samples → xs ${trainAll.xs.shape}\n` +
+        `Val:   ${valN} samples → xs ${split.valXs.shape}\n` +
+        `Test:  ${testN} samples → xs ${testAll.xs.shape}\n\n` +
+        `Noise: Gaussian factor=${NOISE_FACTOR}\n` +
+        `Loss: binaryCrossentropy (prevents all-black collapse)\n` +
+        `Decoder: UpSampling2D + Conv2D (stable in browsers)`
       );
-      log(`Data loaded. IMG_SIZE=${IMG_SIZE}. Model built.`);
+
+      log(`Data ready. Train=${trainN}, Val=${valN}, Test=${testN}`);
+      log("Built two autoencoders: MAX pooling and AVG pooling.");
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      setStatus(`Error loading data:\n${msg}`);
-      log(`ERROR: ${msg}`);
+      setStatus(`Error loading data:\n${friendlyError(err)}`);
+      log(`ERROR: ${friendlyError(err)}`);
     } finally {
       busy = false;
       setButtonsEnabled();
     }
   }
 
-  // -----------------------------
+  // ---------------------------
   // Training
-  // -----------------------------
+  // ---------------------------
+  async function trainOneModel(modelToTrain, label, trainXsClean, valXsClean) {
+    const epochs = 15;
+    const batchSize = 128;
+
+    log(`Training ${label}: epochs=${epochs}, batchSize=${batchSize}, noise=${NOISE_FACTOR}`);
+
+    const t0 = performance.now();
+
+    // Create noisy inputs; targets remain clean.
+    const noisyTrainXs = addRandomNoise(trainXsClean, NOISE_FACTOR);
+    const noisyValXs = addRandomNoise(valXsClean, NOISE_FACTOR);
+
+    const fitSurface = { name: `AE ${label} (Loss)`, tab: "Training" };
+    const callbacks = tfvis.show.fitCallbacks(
+      fitSurface,
+      ["loss", "val_loss"],
+      {
+        callbacks: [{
+          onEpochEnd: async (epoch, logs) => {
+            log(`${label} epoch ${epoch + 1}: loss=${logs.loss?.toFixed(5)} val_loss=${logs.val_loss?.toFixed(5)}`);
+            await tf.nextFrame();
+          }
+        }]
+      }
+    );
+
+    const history = await modelToTrain.fit(noisyTrainXs, trainXsClean, {
+      epochs,
+      batchSize,
+      shuffle: true,
+      validationData: [noisyValXs, valXsClean],
+      callbacks
+    });
+
+    noisyTrainXs.dispose();
+    noisyValXs.dispose();
+
+    const t1 = performance.now();
+    const durSec = (t1 - t0) / 1000;
+
+    const valLossHist = history.history.val_loss || [];
+    const bestValLoss = valLossHist.length ? Math.min(...valLossHist) : NaN;
+
+    log(`Training ${label} done in ${durSec.toFixed(2)}s. Best val_loss=${bestValLoss.toFixed(5)}`);
+    return { durSec, bestValLoss };
+  }
+
   async function onTrain() {
     if (busy) return;
-    if (!split || !model) return;
+    if (!split || !modelMax || !modelAvg) return;
 
     busy = true;
     setButtonsEnabled();
@@ -290,108 +389,124 @@
       clearPreview();
       overallAcc.textContent = "—";
 
-      const epochs = 10;
-      const batchSize = (IMG_SIZE >= 64) ? 64 : 128;
+      log("=== TRAINING START (Autoencoders) ===");
+      const resMax = await trainOneModel(modelMax, "MAX", split.trainXs, split.valXs);
+      await tf.nextFrame();
+      const resAvg = await trainOneModel(modelAvg, "AVG", split.trainXs, split.valXs);
 
-      log(`Training autoencoder: epochs=${epochs}, batchSize=${batchSize}`);
+      log("=== TRAINING COMPLETE ===");
+      log(`MAX: ${resMax.durSec.toFixed(2)}s, best val_loss=${resMax.bestValLoss.toFixed(5)}`);
+      log(`AVG: ${resAvg.durSec.toFixed(2)}s, best val_loss=${resAvg.bestValLoss.toFixed(5)}`);
 
-      const fitSurface = { name: "Training (Loss)", tab: "Training" };
-      const callbacks = tfvis.show.fitCallbacks(
-        fitSurface,
-        ["loss", "val_loss"],
-        {
-          callbacks: [{
-            onEpochEnd: async (epoch, logs) => {
-              log(`Epoch ${epoch + 1}: loss=${logs.loss?.toFixed(5)} val_loss=${logs.val_loss?.toFixed(5)}`);
-              await tf.nextFrame();
-            }
-          }]
-        }
+      setStatus(
+        dataStatus.textContent +
+        `\n\nTraining finished.\n` +
+        `MAX best val_loss: ${resMax.bestValLoss.toFixed(5)}\n` +
+        `AVG best val_loss: ${resAvg.bestValLoss.toFixed(5)}\n` +
+        `Now click "Test 5 Random" to see denoising outputs.`
       );
 
-      const t0 = performance.now();
-
-      // Autoencoder target is the clean input itself
-      await model.fit(split.trainXs, split.trainXs, {
-        epochs,
-        batchSize,
-        shuffle: true,
-        validationData: [split.valXs, split.valXs],
-        callbacks
-      });
-
-      const t1 = performance.now();
-      log(`Training done in ${((t1 - t0) / 1000).toFixed(2)}s`);
+      renderModelInfo();
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      log(`ERROR (train): ${msg}`);
-      setStatus(`Training error:\n${msg}\n\n${dataStatus.textContent}`);
+      log(`ERROR (training): ${friendlyError(err)}`);
+      setStatus(`Training error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
     } finally {
       busy = false;
       setButtonsEnabled();
     }
   }
 
-  // -----------------------------
-  // Evaluation (report MSE)
-  // -----------------------------
+  // ---------------------------
+  // Evaluation (simple metric for homework)
+  // ---------------------------
+  // We re-use the "Overall Test Accuracy" label to show reconstruction quality.
+  // We'll compute MSE just as a numeric baseline, even though training uses BCE.
+  async function evaluateMSE(modelToEval, label, testXsClean) {
+    const batchSize = 512;
+    const n = testXsClean.shape[0];
+
+    const testXsNoisy = addRandomNoise(testXsClean, NOISE_FACTOR);
+
+    let sum = 0;
+    let count = 0;
+
+    for (let start = 0; start < n; start += batchSize) {
+      const size = Math.min(batchSize, n - start);
+
+      const mseVal = tf.tidy(() => {
+        const xClean = testXsClean.slice([start, 0, 0, 0], [size, 28, 28, 1]);
+        const xNoisy = testXsNoisy.slice([start, 0, 0, 0], [size, 28, 28, 1]);
+        const recon = modelToEval.predict(xNoisy);
+        const mse = recon.sub(xClean).square().mean();
+        const v = mse.dataSync()[0];
+        return v;
+      });
+
+      sum += mseVal * size;
+      count += size;
+      await tf.nextFrame();
+    }
+
+    testXsNoisy.dispose();
+
+    const mse = sum / count;
+    const psnr = 20 * Math.log10(1.0) - 10 * Math.log10(mse);
+    log(`${label} test MSE=${mse.toFixed(6)} PSNR=${psnr.toFixed(2)} dB`);
+    return { mse, psnr };
+  }
+
   async function onEvaluate() {
     if (busy) return;
-    if (!testXsAll || !model) return;
+    if (!testAll || !modelMax || !modelAvg) return;
 
     busy = true;
     setButtonsEnabled();
 
     try {
-      log("Evaluating reconstruction (MSE) on test set...");
+      clearPreview();
+      log("Evaluating denoising performance (MSE/PSNR) on test set...");
+      await tf.nextFrame();
 
-      const n = testXsAll.shape[0];
-      const batchSize = 128;
-      let sum = 0;
-      let count = 0;
+      const rMax = await evaluateMSE(modelMax, "MAX", testAll.xs);
+      const rAvg = await evaluateMSE(modelAvg, "AVG", testAll.xs);
 
-      for (let start = 0; start < n; start += batchSize) {
-        const size = Math.min(batchSize, n - start);
+      overallAcc.textContent =
+        `MAX MSE ${rMax.mse.toFixed(5)} | AVG MSE ${rAvg.mse.toFixed(5)} (noise=${NOISE_FACTOR})`;
 
-        const mse = tf.tidy(() => {
-          const x = testXsAll.slice([start, 0, 0, 0], [size, IMG_SIZE, IMG_SIZE, 1]);
-          const y = model.predict(x);
-          // Mean squared error over batch
-          return y.sub(x).square().mean().dataSync()[0];
-        });
-
-        sum += mse * size;
-        count += size;
-
-        if (start % (batchSize * 10) === 0) await tf.nextFrame();
-      }
-
-      const mseAll = sum / count;
-      overallAcc.textContent = `Test MSE: ${mseAll.toFixed(6)}`;
-      log(`Test MSE = ${mseAll.toFixed(6)}`);
-
-      // Show a simple bar chart in visor
       tfvis.render.barchart(
-        { name: "Test MSE (Lower is Better)", tab: "Evaluation" },
-        [{ index: "Autoencoder", value: mseAll }],
-        { xLabel: "Model", yLabel: "MSE", height: 260 }
+        { name: "Denoising MSE (Lower is Better)", tab: "Evaluation" },
+        [
+          { index: "MAX", value: rMax.mse },
+          { index: "AVG", value: rAvg.mse }
+        ],
+        { xLabel: "Model", yLabel: "MSE", height: 300 }
       );
+
+      tfvis.render.barchart(
+        { name: "Denoising PSNR (Higher is Better)", tab: "Evaluation" },
+        [
+          { index: "MAX", value: rMax.psnr },
+          { index: "AVG", value: rAvg.psnr }
+        ],
+        { xLabel: "Model", yLabel: "PSNR (dB)", height: 300 }
+      );
+
+      log("Evaluation charts rendered in Visor (Evaluation tab).");
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      log(`ERROR (eval): ${msg}`);
-      setStatus(`Evaluation error:\n${msg}\n\n${dataStatus.textContent}`);
+      log(`ERROR (evaluation): ${friendlyError(err)}`);
+      setStatus(`Evaluation error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
     } finally {
       busy = false;
       setButtonsEnabled();
     }
   }
 
-  // -----------------------------
-  // Preview: 5 random test images + reconstructions
-  // -----------------------------
+  // ---------------------------
+  // Step 3: Test 5 Random preview
+  // ---------------------------
   async function onTestFive() {
     if (busy) return;
-    if (!testXsAll || !model) return;
+    if (!testAll || !modelMax || !modelAvg) return;
 
     busy = true;
     setButtonsEnabled();
@@ -399,93 +514,117 @@
     try {
       clearPreview();
 
-      const { batchXs } = window.getRandomTestBatch(testXsAll, testXsAll, 5);
+      const { batchXs, batchYs } = window.getRandomTestBatch(testAll.xs, testAll.ys, 5);
+      const noisyBatch = addRandomNoise(batchXs, NOISE_FACTOR);
 
-      const recon = tf.tidy(() => model.predict(batchXs));
+      const reconMax = modelMax.predict(noisyBatch);
+      const reconAvg = modelAvg.predict(noisyBatch);
+
+      // DEBUG: If these ranges are near [0,0], it will look black.
+      const maxMin = reconMax.min().dataSync()[0];
+      const maxMax = reconMax.max().dataSync()[0];
+      const avgMin = reconAvg.min().dataSync()[0];
+      const avgMax = reconAvg.max().dataSync()[0];
+      log(`Recon ranges -> MAX: [${maxMin.toFixed(4)}, ${maxMax.toFixed(4)}], AVG: [${avgMin.toFixed(4)}, ${avgMax.toFixed(4)}]`);
 
       for (let i = 0; i < 5; i++) {
         const item = document.createElement("div");
         item.className = "previewItem";
-        item.style.minWidth = "220px";
+        item.style.minWidth = "280px";
 
-        const row = document.createElement("div");
-        row.style.display = "grid";
-        row.style.gridTemplateColumns = "repeat(2, 1fr)";
-        row.style.gap = "8px";
+        const title = document.createElement("div");
+        title.style.fontSize = "11px";
+        title.style.color = "#93a4c7";
+        title.style.marginBottom = "6px";
+        title.textContent = `Sample #${i + 1}`;
+        item.appendChild(title);
 
-        const makeCell = (label) => {
+        const grid = document.createElement("div");
+        grid.style.display = "grid";
+        grid.style.gridTemplateColumns = "repeat(4, 1fr)";
+        grid.style.gap = "6px";
+
+        const makeCell = (labelText) => {
           const wrap = document.createElement("div");
           wrap.style.textAlign = "center";
 
-          const canvas = document.createElement("canvas");
-          canvas.style.borderRadius = "10px";
-          canvas.style.imageRendering = "pixelated";
+          const c = document.createElement("canvas");
+          c.width = 28 * PREVIEW_SCALE;
+          c.height = 28 * PREVIEW_SCALE;
 
-          const txt = document.createElement("div");
-          txt.style.fontSize = "10px";
-          txt.style.color = "#93a4c7";
-          txt.style.marginTop = "4px";
-          txt.textContent = label;
+          const lbl = document.createElement("div");
+          lbl.style.fontSize = "10px";
+          lbl.style.color = "#93a4c7";
+          lbl.style.marginTop = "4px";
+          lbl.textContent = labelText;
 
-          wrap.appendChild(canvas);
-          wrap.appendChild(txt);
-          return { wrap, canvas };
+          wrap.appendChild(c);
+          wrap.appendChild(lbl);
+          return { wrap, canvas: c };
         };
 
-        const a = makeCell("Input");
-        const b = makeCell("Reconstruction");
+        const cleanCell = makeCell("Clean");
+        const noisyCell = makeCell("Noisy");
+        const maxCell = makeCell("Denoised (Max)");
+        const avgCell = makeCell("Denoised (Avg)");
 
-        row.appendChild(a.wrap);
-        row.appendChild(b.wrap);
-        item.appendChild(row);
+        grid.appendChild(cleanCell.wrap);
+        grid.appendChild(noisyCell.wrap);
+        grid.appendChild(maxCell.wrap);
+        grid.appendChild(avgCell.wrap);
+
+        item.appendChild(grid);
         previewStrip.appendChild(item);
 
-        const x = batchXs.slice([i, 0, 0, 0], [1, IMG_SIZE, IMG_SIZE, 1]);
-        const y = recon.slice([i, 0, 0, 0], [1, IMG_SIZE, IMG_SIZE, 1]);
+        const clean = batchXs.slice([i, 0, 0, 0], [1, 28, 28, 1]);
+        const noisy = noisyBatch.slice([i, 0, 0, 0], [1, 28, 28, 1]);
+        const dMax = reconMax.slice([i, 0, 0, 0], [1, 28, 28, 1]);
+        const dAvg = reconAvg.slice([i, 0, 0, 0], [1, 28, 28, 1]);
 
-        // data-loader.js may expose drawToCanvas or drawImageToCanvas, use whichever exists.
-        const draw = window.drawToCanvas || window.drawImageToCanvas || window.draw28x28ToCanvas;
-        draw(x, a.canvas, IMG_SIZE >= 64 ? 2 : 4);
-        draw(y, b.canvas, IMG_SIZE >= 64 ? 2 : 4);
+        window.draw28x28ToCanvas(clean, cleanCell.canvas, PREVIEW_SCALE);
+        window.draw28x28ToCanvas(noisy, noisyCell.canvas, PREVIEW_SCALE);
+        window.draw28x28ToCanvas(dMax, maxCell.canvas, PREVIEW_SCALE);
+        window.draw28x28ToCanvas(dAvg, avgCell.canvas, PREVIEW_SCALE);
 
-        x.dispose();
-        y.dispose();
-
+        clean.dispose(); noisy.dispose(); dMax.dispose(); dAvg.dispose();
         await tf.nextFrame();
       }
 
-      batchXs.dispose();
-      recon.dispose();
+      log(`Previewed 5 random test samples with noise=${NOISE_FACTOR} (Clean|Noisy|Max|Avg).`);
 
-      log("Previewed 5 random reconstructions.");
+      reconMax.dispose();
+      reconAvg.dispose();
+      noisyBatch.dispose();
+      batchXs.dispose();
+      batchYs.dispose();
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      log(`ERROR (preview): ${msg}`);
-      setStatus(`Preview error:\n${msg}\n\n${dataStatus.textContent}`);
+      log(`ERROR (test 5): ${friendlyError(err)}`);
+      setStatus(`Preview error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
     } finally {
       busy = false;
       setButtonsEnabled();
     }
   }
 
-  // -----------------------------
-  // Save/Load model (downloads + browserFiles)
-  // -----------------------------
+  // ---------------------------
+  // Step 4: Save / Load model files (ACTIVE slot)
+  // ---------------------------
   async function onSaveDownload() {
     if (busy) return;
-    if (!model) return;
+    const active = getActiveModel();
+    if (!active) return;
 
     busy = true;
     setButtonsEnabled();
 
     try {
-      log("Saving model to downloads...");
-      await model.save("downloads://autoencoder");
-      log("Download triggered: autoencoder.json + autoencoder.weights.bin");
+      const name = activeModelKey === "avg" ? "mnist-ae-avgpool" : "mnist-ae-maxpool";
+      log(`Saving ACTIVE model (${activeModelKey.toUpperCase()}) to downloads as '${name}'...`);
+      await active.save(`downloads://${name}`);
+      log(`Model download triggered: ${name}.json + ${name}.weights.bin`);
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      log(`ERROR (save): ${msg}`);
-      setStatus(`Save error:\n${msg}\n\n${dataStatus.textContent}`);
+      log(`ERROR (save): ${friendlyError(err)}`);
+      setStatus(`Save error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
     } finally {
       busy = false;
       setButtonsEnabled();
@@ -494,121 +633,153 @@
 
   async function onLoadFromFiles() {
     if (busy) return;
-
     busy = true;
     setButtonsEnabled();
 
     try {
-      const jsonFile = modelJsonInput?.files?.[0];
-      const binFile  = modelBinInput?.files?.[0];
-      if (!jsonFile || !binFile) throw new Error("Choose BOTH model.json and weights.bin.");
+      const jsonFile = modelJsonInput.files && modelJsonInput.files[0];
+      const binFile = modelBinInput.files && modelBinInput.files[0];
+      if (!jsonFile || !binFile) {
+        throw new Error("Please choose BOTH model.json and weights.bin to load the model.");
+      }
 
-      log("Loading model from files...");
+      log(`Loading model from files into ACTIVE slot (${activeModelKey.toUpperCase()})...`);
+      await tf.nextFrame();
+
       const loaded = await tf.loadLayersModel(tf.io.browserFiles([jsonFile, binFile]));
 
-      // Compile for evaluate/fit
-      loaded.compile({ optimizer: "adam", loss: "binaryCrossentropy" });
+      // Compile for eval/further training
+      loaded.compile({
+        optimizer: tf.train.adam(1e-3),
+        loss: "binaryCrossentropy"
+      });
 
-      // Replace old model safely
-      disposeModel();
-      model = loaded;
-      renderModelSummary();
+      if (activeModelKey === "avg") {
+        if (modelAvg) modelAvg.dispose();
+        modelAvg = loaded;
+      } else {
+        if (modelMax) modelMax.dispose();
+        modelMax = loaded;
+      }
 
-      log("Model loaded successfully.");
+      renderModelInfo();
+      log("Model loaded successfully from files.");
     } catch (err) {
-      const msg = (err && err.message) ? err.message : String(err);
-      log(`ERROR (load model): ${msg}`);
-      setStatus(`Load model error:\n${msg}\n\n${dataStatus.textContent}`);
+      log(`ERROR (load model): ${friendlyError(err)}`);
+      setStatus(`Load model error:\n${friendlyError(err)}\n\n${dataStatus.textContent}`);
     } finally {
       busy = false;
       setButtonsEnabled();
     }
   }
 
-  // -----------------------------
-  // Reset
-  // -----------------------------
+  // ---------------------------
+  // Reset + cleanup
+  // ---------------------------
+  function disposeAllTensors() {
+    if (split) {
+      split.trainXs?.dispose?.();
+      split.trainYs?.dispose?.();
+      split.valXs?.dispose?.();
+      split.valYs?.dispose?.();
+      split = null;
+    }
+    if (trainAll) {
+      trainAll.xs?.dispose?.();
+      trainAll.ys?.dispose?.();
+      trainAll = null;
+    }
+    if (testAll) {
+      testAll.xs?.dispose?.();
+      testAll.ys?.dispose?.();
+      testAll = null;
+    }
+  }
+
+  function disposeModels() {
+    if (modelMax) { modelMax.dispose(); modelMax = null; }
+    if (modelAvg) { modelAvg.dispose(); modelAvg = null; }
+  }
+
   function onReset() {
     if (busy) return;
 
-    disposeTensors();
-    disposeModel();
-    resetUI();
+    try {
+      clearPreview();
+      clearLogs();
+      overallAcc.textContent = "—";
 
-    // Clear file inputs so same file can be reselected
-    if (trainCsvInput) trainCsvInput.value = "";
-    if (testCsvInput) testCsvInput.value = "";
-    if (modelJsonInput) modelJsonInput.value = "";
-    if (modelBinInput) modelBinInput.value = "";
+      disposeAllTensors();
+      disposeModels();
 
-    if (trainName) trainName.textContent = "No file selected";
-    if (testName)  testName.textContent  = "No file selected";
-    if (jsonName)  jsonName.textContent  = "No file";
-    if (binName)   binName.textContent   = "No file";
+      activeModelKey = "max";
+      renderModelInfo();
 
-    IMG_SIZE = 28;
-    setStatus("Reset.\nUpload train/test CSV files, then click Load Data.");
-    setButtonsEnabled();
-  }
+      setStatus(`Reset.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
 
-  // -----------------------------
-  // Bind UI
-  // -----------------------------
-  function bindUI() {
-    // Defensive: if IDs mismatch, fail loudly in console
-    if (!trainCsvInput || !testCsvInput || !btnLoadData) {
-      console.error("Missing required DOM elements. Check index.html IDs:", {
-        trainCsv: !!trainCsvInput,
-        testCsv: !!testCsvInput,
-        btnLoadData: !!btnLoadData
-      });
+      trainCsvInput.value = "";
+      testCsvInput.value = "";
+      modelJsonInput.value = "";
+      modelBinInput.value = "";
+
+      trainName.textContent = "No file selected";
+      testName.textContent = "No file selected";
+      jsonName.textContent = "No file";
+      binName.textContent = "No file";
+    } finally {
+      busy = false;
+      setButtonsEnabled();
     }
-
-    trainCsvInput?.addEventListener("change", () => {
-      const f = trainCsvInput.files?.[0];
-      if (trainName) trainName.textContent = f ? f.name : "No file selected";
-    });
-
-    testCsvInput?.addEventListener("change", () => {
-      const f = testCsvInput.files?.[0];
-      if (testName) testName.textContent = f ? f.name : "No file selected";
-    });
-
-    modelJsonInput?.addEventListener("change", () => {
-      const f = modelJsonInput.files?.[0];
-      if (jsonName) jsonName.textContent = f ? f.name : "No file";
-    });
-
-    modelBinInput?.addEventListener("change", () => {
-      const f = modelBinInput.files?.[0];
-      if (binName) binName.textContent = f ? f.name : "No file";
-    });
-
-    btnLoadData?.addEventListener("click", onLoadData);
-    btnTrain?.addEventListener("click", onTrain);
-    btnEval?.addEventListener("click", onEvaluate);
-    btnTest5?.addEventListener("click", onTestFive);
-    btnSave?.addEventListener("click", onSaveDownload);
-    btnLoadModel?.addEventListener("click", onLoadFromFiles);
-    btnReset?.addEventListener("click", onReset);
-    btnToggleVisor?.addEventListener("click", showOrToggleVisor);
   }
 
-  // -----------------------------
+  // ---------------------------
+  // Wire UI
+  // ---------------------------
+  function bindUI() {
+    trainCsvInput.addEventListener("change", () => {
+      const f = trainCsvInput.files && trainCsvInput.files[0];
+      trainName.textContent = f ? f.name : "No file selected";
+    });
+
+    testCsvInput.addEventListener("change", () => {
+      const f = testCsvInput.files && testCsvInput.files[0];
+      testName.textContent = f ? f.name : "No file selected";
+    });
+
+    modelJsonInput.addEventListener("change", () => {
+      const f = modelJsonInput.files && modelJsonInput.files[0];
+      jsonName.textContent = f ? f.name : "No file";
+    });
+
+    modelBinInput.addEventListener("change", () => {
+      const f = modelBinInput.files && modelBinInput.files[0];
+      binName.textContent = f ? f.name : "No file";
+    });
+
+    btnLoadData.addEventListener("click", () => onLoadData());
+    btnTrain.addEventListener("click", () => onTrain());
+    btnEval.addEventListener("click", () => onEvaluate());
+    btnTest5.addEventListener("click", () => onTestFive());
+    btnSave.addEventListener("click", () => onSaveDownload());
+    btnLoadModel.addEventListener("click", () => onLoadFromFiles());
+    btnReset.addEventListener("click", () => onReset());
+    btnToggleVisor.addEventListener("click", () => showOrToggleVisor());
+  }
+
+  // ---------------------------
   // Boot
-  // -----------------------------
+  // ---------------------------
   function boot() {
-    // Close visor by default (optional)
     try { tfvis.visor().close(); } catch (_) {}
 
-    setStatus("Ready.\nUpload train/test CSV files, then click Load Data.");
-    renderModelSummary();
+    setStatus(`Ready.\nUpload train/test CSV files, then click Load Data.\nNoise factor=${NOISE_FACTOR}`);
+    renderModelInfo();
     bindUI();
     setButtonsEnabled();
 
-    log("Autoencoder app loaded. Using data-loader.js for CSV parsing + shape inference.");
+    log("Autoencoder mode: Train noisy→clean. Preview shows Clean|Noisy|Denoised(Max)|Denoised(Avg).");
+    log("Fixes: BCE loss + UpSampling decoder (prevents all-black collapse).");
   }
 
   boot();
-
 })();
